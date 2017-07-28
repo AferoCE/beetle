@@ -1,0 +1,8 @@
+
+pkg/src/CMakeFiles/
+pkg/src/CMakeCache.txt
+pkg/src/beetle
+pkg/src/Makefile
+pkg/src/cmake_install.cmake
+pkg/src/*~
+

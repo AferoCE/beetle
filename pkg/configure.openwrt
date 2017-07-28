@@ -1,0 +1,9 @@
+autoreconf --install
+
+# Configure for crosscompiling for openWRT on  a TP-Link MIPS-based router. 
+./configure  \
+CC=$STAGING_DIR/bin/mips-openwrt-linux-gcc CXX=$STAGING_DIR/bin/mips-openwrt-linux-g++ \
+--build=mips-openwrt-linux \
+--host=mips-openwrt-linux-uclibc \
+CPPFLAGS="-I$BUILD_DIR/bluez-5.24/ipkg-install/usr/include/" \
+LDFLAGS="-L$BUILD_DIR/bluez-5.24/ipkg-install/usr/lib/"

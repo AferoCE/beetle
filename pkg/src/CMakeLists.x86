@@ -1,0 +1,22 @@
+cmake_minimum_required (VERSION 2.8)
+
+SET(CMAKE_SYSTEM_NAME Linux)
+SET(CMAKE_SYSTEM_VERSION 1)
+SET(CMAKE_C_COMPILER /usr/bin/gcc)
+SET(CMAKE_CXX_COMPILER /usr/bin/g++)
+SET(CMAKE_FIND_ROOT_PATH /)
+SET(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+SET(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+SET(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+
+project (Beetle)
+
+# I shouldn't have to do this but for some reason it's not picking up the directories from the above lines
+include_directories(/usr/include)
+
+add_executable(beetle beetle.c command.c devicelist.c connlist.c babygatt.c utils.c)
+
+target_link_libraries(beetle /usr/lib/x86_64-linux-gnu/libbluetooth.a)
+
+#-lbluetooth)
+
