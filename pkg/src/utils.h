@@ -25,7 +25,6 @@ char *data2hex(char *dest, int dest_size, const uint8_t *data, int len);
 int hex2data(const char *s, uint8_t *data, int len);
 char *data2hexLE(char *dst, uint8_t *data, int len);
 int addr2str(void *addr, char *str);
-void log_failure(char *what);
 time_t get_mono_time(void);
 
 #endif // __UTILS_H__

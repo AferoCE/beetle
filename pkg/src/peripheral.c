@@ -27,7 +27,6 @@
 #include <time.h>
 #include <fcntl.h>
 #include <stdarg.h>
-#include <syslog.h>
 
 #include <sys/poll.h>
 #include <sys/ioctl.h>
@@ -44,6 +43,7 @@
 #include "command.h"
 #include "devicelist.h"
 #include "evloop.h"
+#include "log.h"
 #include "peripheral.h"
 #include "utils.h"
 
@@ -125,7 +125,7 @@ static evloop_handler_result_t handle_connection_read(evloop_t *ev, int fd, void
     uint8_t buffer[PERIPHERAL_BUFFER_SIZE];
     ssize_t len = recv(fd, buffer, sizeof(buffer), 0);
     if (len == 0 || (len < 0 && errno == ECONNRESET)) {
-        syslog(LOG_INFO, "peripheral closed socket");
+        INFO("peripheral closed socket");
         close(fd);
         context->connection_fd = -1;
         send_cmd("pdi %s", context->addr);
@@ -182,7 +182,7 @@ int peripheral_session(int client_fd, bhci_t *bhci) {
         return SESSION_FAILED_NONFATAL;
     }
 
-    syslog(LOG_INFO, "starting peripheral session: hci_fd=%d, listen_fd=%d", bhci->fd, context.listen_fd);
+    INFO("starting peripheral session: hci_fd=%d, listen_fd=%d", bhci->fd, context.listen_fd);
     s_advertising = 0;
 
     evloop_t ev;
@@ -198,7 +198,7 @@ int peripheral_session(int client_fd, bhci_t *bhci) {
 
     if (evloop_run(&ev) != EL_STOPPED) return SESSION_FAILED_FATAL;
 
-    syslog(LOG_WARNING, "closing peripheral session");
+    INFO("closing peripheral session");
 
     bhci_disable_advertising(bhci);
 

@@ -20,16 +20,14 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
-#include <syslog.h>
 #include <unistd.h>
 
 #include "beetle.h"
-#include "connlist.h"
 #include "babygatt_central.h"
 #include "babygatt_common.h"
+#include "connlist.h"
+#include "log.h"
 #include "utils.h"
-
-extern int g_debug;
 
 #define PENDING_COMMAND_READ    0
 #define PENDING_COMMAND_WRITE   1
@@ -38,6 +36,7 @@ extern int g_debug;
 static int send_gap(conn_info_t *ci, int nparams, int cmd, int p1, int p2, int p3)
 {
     uint8_t buf[7];
+    char hexbuf[15];
 
     if (ci == NULL)
         return -1;
@@ -50,15 +49,7 @@ static int send_gap(conn_info_t *ci, int nparams, int cmd, int p1, int p2, int p
     buf[5] = p3 & 0xff;
     buf[6] = p3 >> 8;
 
-    if (g_debug >= 2) {
-        int i;
-        char hexbuf[15];
-        for (i = 0; i < 1 + nparams * 2; i++) {
-            sprintf (hexbuf + i*2, "%02x", buf[i]);
-        }
-        syslog(LOG_DEBUG,"l2s %04x %s", ci->l2cap_fd, hexbuf);
-    }
-
+    TRACE("l2s %04x %s", ci->l2cap_fd, data2hex(hexbuf, sizeof(hexbuf), buf, 1 + nparams * 2));
     return write(ci->l2cap_fd, buf, 1 + nparams * 2);
 }
 
@@ -200,10 +191,10 @@ int cmd_kattributes(void *param1, void *param2, void *param3, void *context)
     }
 
     if (ci->d_info->attributes != NULL) {
-        syslog(LOG_DEBUG, "about to free stale attributes for %s, ptr=%p", ci->d_info->addr, ci->d_info->attributes);
+        DEBUG("about to free stale attributes for %s, ptr=%p", ci->d_info->addr, ci->d_info->attributes);
         free(ci->d_info->attributes);
         ci->d_info->attributes = NULL;
-        syslog(LOG_DEBUG, "stale attribute free was successful");
+        DEBUG("stale attribute free was successful");
     }
     ci->flags |= CONN_FLAGS_PENDING_OP;
     ci->pend_cmd = PENDING_COMMAND_KAT;
@@ -245,24 +236,17 @@ int cmd_write(void *param1, void *param2, void *param3, void *context)
     ci->attr_id = kattr_id;
 
     uint8_t buf[DEFAULT_BLE_MTU];
+    char dump[(MAX_WRITE_PACKET_SIZE + WRITE_COMMAND_SIZE) * 2 + 1];
 
     buf[0] = kattr->isNoResponse ? ATT_OP_WRITE_CMD : ATT_OP_WRITE_REQ;
     buf[1] = kattr->write_handle & 0xff;
     buf[2] = kattr->write_handle >> 8;
 
     int num_chars = hex2data(param3, buf + WRITE_COMMAND_SIZE, MAX_WRITE_PACKET_SIZE);
-
-    if (g_debug >= 2) {
-        char dump[(MAX_WRITE_PACKET_SIZE + WRITE_COMMAND_SIZE) * 2 + 1];
-        int i;
-        for (i = 0; i < num_chars + 3; i++) {
-            sprintf(&dump[i*2],"%02x",buf[i]);
-        }
-        syslog(LOG_DEBUG, "l2s %s", dump);
-    }
+    TRACE("l2s %s", data2hex(dump, sizeof(dump), buf, num_chars + 3));
 
     if (write(ci->l2cap_fd, buf, num_chars + 3) < 0) {
-        syslog(LOG_ERR,"cmd_write:i/o error:%s", strerror(errno));
+        log_failure("cmd_write:write");
         send_cmd("wri %04x %04x %04x", ci->l2cap_fd, ci->attr_id, STATUS_IO_ERROR);
         return -1;
     }
@@ -346,7 +330,7 @@ int cmd_notify_enable(void *param1, void *param2, void *param3, void *context)
 
     if (send_gap(ci, 2, ATT_OP_WRITE_CMD, kattr->read_config_handle, sendValue, 0) < 0) {
         /* seems like this happens sometimes if the socket is just... dead */
-        syslog(LOG_ERR, "cmd_notify_enable:i/o error:%s", strerror(errno));
+        log_failure("cmd_notify_enable");
         send_cmd("nen %04x %04x %04x", l2cap_fd, kattr_id, STATUS_IO_ERROR);
         shutdown(l2cap_fd, SHUT_WR);
         return 0;
@@ -362,8 +346,7 @@ void on_central_data(conn_info_t *ci, uint8_t *data, int len)
     int opcode = data[0];
 
     switch (opcode) {
-        case ATT_OP_ERROR :
-        {
+        case ATT_OP_ERROR: {
             switch (data[1]) {
                 case ATT_OP_READ_BY_TYPE_REQ :
                 case ATT_OP_FIND_INFO_REQ :
@@ -372,7 +355,7 @@ void on_central_data(conn_info_t *ci, uint8_t *data, int len)
                     /* The last entry in the list is marked with an attribute == 0 */
                     kattribute_t *new = (kattribute_t *)calloc(ci->num_attr + 1, sizeof(kattribute_t));
                     if (new == NULL) {
-                        syslog(LOG_ERR, "can't allocate space for attributes");
+                        ERROR("can't allocate space for attributes");
                         return;
                     }
 
@@ -380,11 +363,11 @@ void on_central_data(conn_info_t *ci, uint8_t *data, int len)
                     ci->d_info->attributes = new;
 
                     /* Print out the attribute list */
-                    if (g_debug >= 1) {
+                    if (g_debugging >= DEBUG_ON) {
                         kattribute_t *ka = new;
                         while (ka->attribute_id != 0) {
-                            syslog(LOG_DEBUG,"attr %d w_handle=%d r_handle=%d rc_handle=%d",
-                                   ka->attribute_id, ka->write_handle, ka->read_handle, ka->read_config_handle);
+                            DEBUG("attr %d w_handle=%d r_handle=%d rc_handle=%d",
+                                ka->attribute_id, ka->write_handle, ka->read_handle, ka->read_config_handle);
                             ka++;
                         }
                     }
@@ -396,7 +379,7 @@ void on_central_data(conn_info_t *ci, uint8_t *data, int len)
                     break;
                 default :
                     if (ci->flags & CONN_FLAGS_PENDING_OP) {
-                        syslog(LOG_ERR, "error for op code %d, error code %d", data[1], data[4]);
+                        ERROR("error for op code %d, error code %d", data[1], data[4]);
                         switch (ci->pend_cmd) {
                             case PENDING_COMMAND_WRITE :
                                 send_cmd("wri %04x %04x %04x", ci->l2cap_fd, ci->attr_id, STATUS_BLUETOOTH_ERROR);
@@ -410,8 +393,8 @@ void on_central_data(conn_info_t *ci, uint8_t *data, int len)
                     }
                     break;
             }
-        }
             break;
+        }
 
         case ATT_OP_READ_BY_TYPE_RESP :
             on_read_by_type_resp(ci, data, len);
@@ -428,14 +411,13 @@ void on_central_data(conn_info_t *ci, uint8_t *data, int len)
             }
             break;
 
-        case ATT_OP_READ_RESP :
-        {
+        case ATT_OP_READ_RESP: {
             char buf[MAX_PACKET_SIZE * 2 + 1];
             data2hex(buf, sizeof(buf), data + 1, len-1);
             ci->flags &= ~CONN_FLAGS_PENDING_OP;
             send_cmd("rea %04x %04x %04x %s", ci->l2cap_fd, ci->attr_id, STATUS_OK, buf);
-        }
             break;
+        }
 
         case ATT_OP_HANDLE_NOTIFY :
         case ATT_OP_HANDLE_IND :
@@ -459,9 +441,9 @@ void on_central_data(conn_info_t *ci, uint8_t *data, int len)
                     }
                 }
             }
-            syslog(LOG_ERR,"unknown attribute for c_handle %d and handle %d", ci->l2cap_fd, handle);
-        }
+            ERROR("unknown attribute for c_handle %d and handle %d", ci->l2cap_fd, handle);
             break;
+        }
 
         default :
             break;

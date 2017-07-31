@@ -19,14 +19,12 @@
 
 #include <string.h>
 #include <stdio.h>
-#include <syslog.h>
 #include "command.h"
 #include "beetle.h"
+#include "log.h"
 #include "utils.h"
 
 #define COMMAND_BUFFER_SIZE 2048
-
-extern int g_debug;
 
 typedef int (*command_handler_t) (void *param1, void *param2, void *param3, void *context);
 
@@ -65,7 +63,7 @@ static int readline(int s, char *buffer, int len) {
         }
         buffer[i] = c;
     }
-    syslog(LOG_ERR,"readline too long");
+    ERROR("readline too long");
     return -1;
 }
 
@@ -108,7 +106,7 @@ static int handle_command(char *line, void *context) {
     for (j = 0; j < num_params; j++) {
         tok = strtok_r(NULL, " \r", &save);
         if (tok == NULL) {
-            syslog(LOG_ERR, "expected %d params but found %d", num_params, j);
+            ERROR("expected %d params but found %d", num_params, j);
             send_cmd("%s %04x", name, STATUS_BAD_PARAM);
             return 0;
         }
@@ -137,9 +135,7 @@ int read_and_execute_client_command(int fd, void *context) {
         log_failure("cmd read");
         return SESSION_FAILED_FATAL;
     }
-    if (g_debug >= 1) {
-        syslog(LOG_DEBUG, ">%s", buf);
-    }
+    DEBUG(">%s", buf);
 
     return handle_command(buf, context);
 }

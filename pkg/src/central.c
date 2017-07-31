@@ -28,7 +28,6 @@
 #include <sys/prctl.h>
 #include <sys/poll.h>
 #include <sys/stat.h>
-#include <syslog.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -44,6 +43,7 @@
 #include "devicelist.h"
 #include "evloop.h"
 #include "hci_beetle.h"
+#include "log.h"
 #include "utils.h"
 
 
@@ -54,6 +54,9 @@
 static evloop_handler_result_t handle_l2cap_write(evloop_t *ev, int fd, void *arg);
 static evloop_handler_result_t handle_l2cap_read(evloop_t *ev, int fd, void *arg);
 
+/* track advertisements we see per minute, for debugging */
+static time_t s_last_adv_update = 0;
+static int s_last_adv_count = 0;
 
 /* commands */
 
@@ -71,7 +74,7 @@ int cmd_connect(void *param1, void *param2, void *param3, void *context) {
     // find the device address
     device_info_t *di = dl_find_by_addr(addr);
     if (di == NULL) {
-        syslog(LOG_ERR, "unknown device %s", addr);
+        ERROR("unknown device %s", addr);
         send_cmd("con %s %04x %04x", addr, STATUS_UNKNOWN_DEVICE, 0);
         return 0;
     }
@@ -79,7 +82,7 @@ int cmd_connect(void *param1, void *param2, void *param3, void *context) {
     // check if the device is already connected
     conn_info_t *ci = cl_find_by_addr(di->addr);
     if (ci != NULL) {
-        syslog(LOG_ERR, "device %s is already connected", addr);
+        ERROR("device %s is already connected", addr);
         send_cmd("con %s %04x %04x", addr, STATUS_ALREADY_CONNECTED, 0);
         return 0;
     }
@@ -87,7 +90,7 @@ int cmd_connect(void *param1, void *param2, void *param3, void *context) {
     // get a free connection handle
     ci = cl_get_unused();
     if (ci == NULL) {
-        syslog(LOG_ERR, "connection list is full");
+        ERROR("connection list is full");
         send_cmd("con %s %04x %04x", addr, STATUS_CONN_LIST_FULL, 0);
         return 0;
     }
@@ -101,7 +104,7 @@ int cmd_connect(void *param1, void *param2, void *param3, void *context) {
     ci->state = CONN_STATE_CONNECTING;
 
     // Connect the device
-    syslog(LOG_INFO, "device_connect %s %04x %04x", ci->d_info->addr, ci->d_info->addr_type, ci->conn_id);
+    INFO("device_connect %s %04x %04x", ci->d_info->addr, ci->d_info->addr_type, ci->conn_id);
 
     if (bhci_device_connect(cc->bhci, di->addr, di->addr_type) < 0) {
         send_cmd("con %s %04x %04x", addr, STATUS_IO_ERROR, 0);
@@ -117,14 +120,15 @@ int cmd_connect(void *param1, void *param2, void *param3, void *context) {
 static void cancel_connect(bhci_t *bhci, evloop_t *ev, conn_info_t *ci) {
     switch (ci->state) {
         case CONN_STATE_CONNECTING:
-            syslog(LOG_DEBUG, "cancel %s: sending cancel request", ci->d_info->addr);
+            DEBUG("cancel %s: sending cancel request", ci->d_info->addr);
             bhci_cancel_device_connect(bhci);
             break;
         case CONN_STATE_CONNECTING_L2CAP:
         case CONN_STATE_CONNECTED:
-            syslog(LOG_DEBUG, "cancel %s: closing l2cap socket", ci->d_info->addr);
+            DEBUG("cancel %s: closing l2cap socket", ci->d_info->addr);
             close(ci->l2cap_fd);
             evloop_cancel_read(ev, ci->l2cap_fd);
+            evloop_cancel_write(ev, ci->l2cap_fd);
             break;
     }
     cl_free(ci);
@@ -137,7 +141,7 @@ int cmd_cancel_connect(void *param1, void *param2, void *param3, void *context) 
     // check if the device is already connected
     conn_info_t *ci = cl_find_by_addr(addr);
     if (ci == NULL) {
-        syslog(LOG_ERR, "cancel %s: no such connection", addr);
+        ERROR("cancel %s: no such connection", addr);
         send_cmd("can %s %04x", addr, STATUS_UNKNOWN_CONN);
         return 0;
     }
@@ -145,11 +149,12 @@ int cmd_cancel_connect(void *param1, void *param2, void *param3, void *context) 
     switch (ci->state) {
         case CONN_STATE_DISCONNECTED:
         case CONN_STATE_DISCONNECTING:
-            syslog(LOG_DEBUG, "cancel %s: not connected", addr);
+            DEBUG("cancel %s: not connected", addr);
             send_cmd("can %s %04x", addr, STATUS_NOT_CONNECTED);
             break;
         default:
             cancel_connect(cc->bhci, cc->ev, ci);
+            bhci_enable_scan(cc->bhci);
             send_cmd("can %s %04x", addr, STATUS_OK);
             break;
     }
@@ -163,16 +168,15 @@ int cmd_disconnect(void *param1, void *param2, void *param3, void *context) {
     conn_info_t *ci = cl_find_by_l2cap_fd(&l2cap_fd);
 
     if (ci == NULL) {
-        syslog(LOG_ERR,"l2cap_fd %d not found", l2cap_fd);
+        ERROR("l2cap_fd %d not found", l2cap_fd);
         send_cmd("dis %04x %04x", l2cap_fd, STATUS_UNKNOWN_CONN);
         return 0;
     }
 
-    syslog(LOG_INFO, "disconnecting %s", ci->d_info->addr);
+    DEBUG("disconnecting %s", ci->d_info->addr);
     ci->state = CONN_STATE_DISCONNECTING;
     shutdown(ci->l2cap_fd, SHUT_WR);
     evloop_cancel_read(cc->ev, ci->l2cap_fd);
-    send_cmd("dis %04x %04x", l2cap_fd, STATUS_OK);
     return 0;
 }
 
@@ -189,36 +193,51 @@ static void handle_disconnect(bhci_t *bhci, evt_disconn_complete *disconn, void 
     evloop_cancel_read(ev, ci->l2cap_fd);
     send_cmd("dis %04x %04x %04x", ci->l2cap_fd, STATUS_OK, disconn->reason);
     cl_free(ci);
+    bhci_enable_scan(bhci);
 }
 
 static void handle_connect(bhci_t *bhci, evt_le_connection_complete *conn, char *addr, void *arg) {
     evloop_t *ev = arg;
     conn_info_t *ci = cl_find_by_addr(addr);
-    if (ci == NULL) return;
+    device_info_t *di = dl_find_by_addr(addr);
 
-    if (ci->state != CONN_STATE_CONNECTING) {
-        syslog(LOG_ERR, "connection to %s finished, but we didn't want it", addr);
+    if (di == NULL) {
+        ERROR("no such device %s", addr);
         return;
     }
 
-    ci->hci_handle = btohs(conn->handle);
-
     // Create L2CAP connection
-    ci->l2cap_fd = bhci_l2cap_connect(ci->d_info->addr, ci->conn_id, ci->d_info->addr_type);
-    if (g_debug >= 1) {
-        syslog(LOG_DEBUG, "l2cap_connect %s fd=%d", addr, ci->l2cap_fd);
+    uint16_t handle = btohs(conn->handle);
+    int fd = bhci_l2cap_connect(addr, 4, di->addr_type);
+
+    if (ci == NULL) {
+        DEBUG("received dead connection; ignoring");
+        close(fd);
+        bhci_enable_scan(bhci);
+        return;
     }
+
+    if (ci->state != CONN_STATE_CONNECTING) {
+        ERROR("connection to %s finished, but we didn't want it", addr);
+        close(fd);
+        bhci_enable_scan(bhci);
+        return;
+    }
+
+    ci->hci_handle = handle;
+    ci->l2cap_fd = fd;
+    DEBUG("l2cap_connect %s fd=%d", addr, ci->l2cap_fd);
 
     /* making an l2cap connection tends to kill our scan */
     bhci_enable_scan(bhci);
 
-    if (ci->l2cap_fd == -1) {
+    if (fd < 0) {
         send_cmd("con %s %04x %04x", addr, STATUS_L2CAP_CONN_FAILED, 0);
         cl_free(ci);
         return;
     } else {
         ci->state = CONN_STATE_CONNECTING_L2CAP;
-        evloop_on_write(ev, ci->l2cap_fd, handle_l2cap_write, NULL);
+        evloop_on_write(ev, fd, handle_l2cap_write, NULL);
     }
 }
 
@@ -229,14 +248,14 @@ static void handle_advertisement(bhci_t *bhci, uint8_t *data, int len, void *arg
     int i;
     for (i = 0; i < report_count && len > 0; i++) {
         if (len < sizeof(le_advertising_info)) {
-          syslog(LOG_DEBUG, "Truncated advertisement header");
+          DEBUG("Truncated advertisement header");
           return;
         }
 
         le_advertising_info *advertisement = (le_advertising_info *)data;
         data += sizeof(le_advertising_info), len -= sizeof(le_advertising_info);
         if (len < advertisement->length) {
-          syslog(LOG_DEBUG, "Truncated advertisement header");
+          DEBUG("Truncated advertisement header");
           return;
         }
 
@@ -271,6 +290,7 @@ static void handle_advertisement(bhci_t *bhci, uint8_t *data, int len, void *arg
                 device->rssi = rxpower;
             }
             send_cmd("adv %s %s %d", addr, manufacturer_data, rxpower);
+            s_last_adv_count++;
         }
     }
 }
@@ -283,6 +303,11 @@ static void handle_l2cap_close(conn_info_t *ci, void *arg) {
     cl_free(ci);
 }
 
+static void handle_l2cap_close_loudly(conn_info_t *ci, void *arg) {
+    send_cmd("dis %04x %04x %04x", ci->l2cap_fd, STATUS_OK, 0);
+    handle_l2cap_close(ci, arg);
+}
+
 static void handle_l2cap_cancel(conn_info_t *ci, void *arg) {
     send_cmd("con %s %04x %04x", ci->d_info->addr, STATUS_L2CAP_CONN_FAILED, 0);
     handle_l2cap_close(ci, arg);
@@ -292,7 +317,7 @@ static void check_connect_timeout(conn_info_t *ci, void *arg) {
     struct command_context *cc = arg;
     if (ci->connect_started == 0) return;
     if (cc->now - ci->connect_started <= CONNECT_TIMEOUT) return;
-    syslog(LOG_DEBUG, "connect timeout on %s", ci->d_info->addr);
+    DEBUG("connect timeout on %s", ci->d_info->addr);
     cancel_connect(cc->bhci, cc->ev, ci);
     send_cmd("con %s %04x %04x", ci->d_info->addr, STATUS_TIMED_OUT, 0);
 }
@@ -320,21 +345,21 @@ static evloop_handler_result_t handle_client_read(evloop_t *ev, int fd, void *ar
 static evloop_handler_result_t handle_l2cap_write(evloop_t *ev, int fd, void *arg) {
     conn_info_t *ci = cl_find_by_l2cap_fd(&fd);
     if (ci == NULL) {
-        syslog(LOG_ERR, "event for unknown l2cap fd=%i", fd);
+        ERROR("event for unknown l2cap fd=%i", fd);
         return EL_STOP;
     }
 
     int err = 0;
     int err_len = sizeof(int);
     if (getsockopt(ci->l2cap_fd, SOL_SOCKET, SO_ERROR, &err, &err_len) < 0 || err != 0) {
-        syslog(LOG_ERR, "l2cap connect fd=%d error %d: %s", ci->l2cap_fd, err, strerror(err));
+        ERROR("l2cap connect fd=%d error %d: %s", ci->l2cap_fd, err, strerror(err));
         close(ci->l2cap_fd);
         send_cmd("con %s %04x %04x", ci->d_info->addr, STATUS_L2CAP_CONN_FAILED, 0);
         cl_free(ci);
         return EL_STOP;
     }
 
-    syslog(LOG_DEBUG, "l2cap connect successful");
+    DEBUG("l2cap connect successful");
     ci->state = CONN_STATE_CONNECTED;
     send_cmd("con %s %04x %04x", ci->d_info->addr, STATUS_OK, ci->l2cap_fd);
     evloop_on_read(ev, fd, handle_l2cap_read, NULL);
@@ -344,25 +369,23 @@ static evloop_handler_result_t handle_l2cap_write(evloop_t *ev, int fd, void *ar
 static evloop_handler_result_t handle_l2cap_read(evloop_t *ev, int fd, void *arg) {
     conn_info_t *ci = cl_find_by_l2cap_fd(&fd);
     if (ci == NULL) {
-        syslog(LOG_ERR, "event for unknown l2cap fd=%i", fd);
+        ERROR("event for unknown l2cap fd=%i", fd);
         return EL_STOP;
     }
 
     uint8_t response[1024];
-    char hexData[2048];
+    char hex_data[2048];
     int len = read(ci->l2cap_fd, response, sizeof(response));
     if (len > 0) {
-        if (g_debug >= 2) {
-            syslog(LOG_DEBUG, "l2r %04x %s", ci->l2cap_fd, data2hex(hexData, 2048, response, len));
-        }
+        TRACE("l2r %04x %s", ci->l2cap_fd, data2hex(hex_data, sizeof(hex_data), response, len));
         on_central_data(ci, response, len);
+        return EL_CONTINUE;
     } else {
-        syslog(LOG_ERR, "l2 read error %s disconnecting %d", strerror(errno), ci->l2cap_fd);
+        ERROR("l2 read error %s disconnecting %d", strerror(errno), ci->l2cap_fd);
         ci->state = CONN_STATE_DISCONNECTING;
-        shutdown(ci->l2cap_fd, SHUT_WR);
-        evloop_cancel_read(ev, ci->l2cap_fd);
+        close(ci->l2cap_fd);
+        return EL_STOP;
     }
-    return EL_CONTINUE;
 }
 
 static evloop_handler_result_t handle_sigusr1(evloop_t *ev, int signal, void *arg) {
@@ -385,6 +408,12 @@ static evloop_handler_result_t handle_periodic(evloop_t *ev, int signal, void *a
     cl_foreach_state(CONN_STATE_CONNECTING, check_connect_timeout, &cc);
     cl_foreach_state(CONN_STATE_CONNECTING_L2CAP, check_connect_timeout, &cc);
 
+    if (cc.now - s_last_adv_update >= 60) {
+        DEBUG("relayed %i advertisements", s_last_adv_count);
+        s_last_adv_count = 0;
+        s_last_adv_update = cc.now;
+    }
+
     return EL_CONTINUE;
 }
 
@@ -398,7 +427,7 @@ int central_session(int client_fd, bhci_t *bhci) {
     if (bhci_set_scan_parameters(bhci, interval, window) < 0) return SESSION_FAILED_NONFATAL;
     if (bhci_enable_scan(bhci) < 0) return SESSION_FAILED_NONFATAL;
 
-    syslog(LOG_INFO, "starting central session: hci_fd=%d", bhci->fd);
+    INFO("starting central session: hci_fd=%d", bhci->fd);
 
     /* close any existing HCI connections */
     bhci_kill_all_connections(bhci);
@@ -421,15 +450,15 @@ int central_session(int client_fd, bhci_t *bhci) {
 
     if (evloop_run(&ev) != EL_STOPPED) return SESSION_FAILED_FATAL;
 
-    syslog(LOG_WARNING, "closing central session");
+    INFO("closing central session");
 
     // stop scanning
     bhci_disable_scan(bhci);
 
     // close all connections
     cl_foreach_state(CONN_STATE_CONNECTING_L2CAP, handle_l2cap_cancel, NULL);
-    cl_foreach_state(CONN_STATE_CONNECTED, handle_l2cap_close, NULL);
-    cl_foreach_state(CONN_STATE_DISCONNECTING, handle_l2cap_close, NULL);
+    cl_foreach_state(CONN_STATE_CONNECTED, handle_l2cap_close_loudly, NULL);
+    cl_foreach_state(CONN_STATE_DISCONNECTING, handle_l2cap_close_loudly, NULL);
 
     int result_code = ev.result_code;
     evloop_free(&ev);

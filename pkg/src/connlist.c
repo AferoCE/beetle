@@ -17,10 +17,8 @@
  *
  *******************************************************************************/
 
-#include <syslog.h>
 #include "connlist.h"
-
-extern int g_debug;
+#include "log.h"
 
 #define MAX_BLE_CONNECTIONS 8
 
@@ -77,7 +75,7 @@ void cl_free(conn_info_t *ci)
     }
 
     if (i >= s_num_conns) {
-        syslog(LOG_ERR,"can't free connection info; not allocated");
+        ERROR("can't free connection info; not allocated");
         return;
     }
 

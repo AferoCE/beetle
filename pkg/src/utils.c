@@ -19,13 +19,12 @@
 
 #include <ctype.h>
 #include <stdint.h>
-#include <syslog.h>
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
-#include "utils.h"
 
-extern int g_debug;
+#include "log.h"
+#include "utils.h"
 
 static const char _hex[] = "0123456789abcdef";
 
@@ -39,7 +38,7 @@ char *data2hex(char *dest, int dest_size, const uint8_t* data, int len)
 {
     int i;
     if (len < 0 || (len * 2 + 1) > dest_size) {
-        syslog(LOG_ERR,"bad len in data2Hex:%d",len);
+        ERROR("bad len in data2Hex:%d", len);
     }
     for (i = 0; i < len; i++) {
         hex(dest + i*2, *data++);
@@ -79,17 +78,7 @@ char *data2hexLE(char* dst, uint8_t* data, int len)
 int addr2str(void *addr, char *str)
 {
     uint8_t *p = (uint8_t *)addr;
-    return sprintf (str,"%02x:%02x:%02x:%02x:%02x:%02x",p[5], p[4], p[3], p[2], p[1], p[0]);
-}
-
-void log_failure(char *what)
-{
-    int err = errno;
-
-    syslog(LOG_ERR, "%s failed: errno=%d, %s", what, err, strerror(err));
-    if (err == ENODEV) {
-        syslog(LOG_EMERG, "bluetooth device disappeared!");
-    }
+    return sprintf (str, "%02x:%02x:%02x:%02x:%02x:%02x",p[5], p[4], p[3], p[2], p[1], p[0]);
 }
 
 time_t get_mono_time(void) {

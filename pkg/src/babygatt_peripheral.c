@@ -20,13 +20,13 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
-#include <syslog.h>
 #include <unistd.h>
 #include <stdint.h>
 
 #include "beetle.h"
 #include "babygatt_peripheral.h"
 #include "babygatt_common.h"
+#include "log.h"
 #include "peripheral.h"
 #include "utils.h"
 
@@ -53,7 +53,7 @@ static int s_numAttributes = 0;
 
 static int add_attribute(uint16_t uuid, uint8_t flags)
 {
-    syslog(LOG_DEBUG, "add_attribute:uuid=%x,flags=%d\n", uuid, flags);
+    DEBUG("add_attribute: uuid=%x, flags=%d\n", uuid, flags);
     if (s_numAttributes >= MAX_GAP_ATTRIBUTES) {
         return -1;
     }
@@ -67,8 +67,7 @@ static int add_attribute(uint16_t uuid, uint8_t flags)
 static int per_send(int fd, uint8_t *data, int len)
 {
     char buf[1024];
-    data2hex(buf, sizeof(buf), data, len);
-    syslog(LOG_DEBUG, "peripheral_send:data=%s", buf);
+    DEBUG("peripheral_send: data=%s", data2hex(buf, sizeof(buf), data, len));
     return write(fd, data, len);
 }
 
@@ -122,7 +121,7 @@ static inline int uuid_size(uint16_t uuid)
 /* returns the number of bytes copied */
 static int copy_to_packet(uint8_t *packet, int pos, uint8_t *data, int dataLen)
 {
-    syslog(LOG_DEBUG, "copy_to_packet packet=%p, pos=%d data=%p, dataLen=%d", packet, pos, data, dataLen);
+    DEBUG("copy_to_packet packet=%p, pos=%d data=%p, dataLen=%d", packet, pos, data, dataLen);
     if (pos + dataLen > DEFAULT_BLE_MTU) {
         return -1;
     }
@@ -133,7 +132,7 @@ static int copy_to_packet(uint8_t *packet, int pos, uint8_t *data, int dataLen)
 
 static void construct_uuid(uint8_t *buf, uint16_t uuid)
 {
-    syslog(LOG_DEBUG,"construct_uuid:uuid=%d", uuid);
+    DEBUG("construct_uuid: uuid=%d", uuid);
     if (uuid_size(uuid) == 2) {
         buf[0] = uuid & 0xff;
         buf[1] = uuid >> 8;
@@ -153,11 +152,6 @@ int check_start_end(int start, int end)
     } else {
         return 0;
     }
-}
-
-int cmd_notify(void *param1, void *param2, void *param3, void *data)
-{
-    send_cmd("not %04x", STATUS_OK);
 }
 
 #define ERROR_PACKET_SIZE 5
@@ -321,7 +315,7 @@ int cmd_per_indicate(void *param1, void *param2, void *param3, void *data)
     struct peripheral_context *context = data;
 
     if (context->connection_fd < 0) {
-        send_cmd("pin %04x %04x", STATUS_NOT_CONNECTED);
+        send_cmd("pin %04x %04x", uuid, STATUS_NOT_CONNECTED);
         return 0;
     }
 
@@ -345,7 +339,7 @@ void per_do_write(int fd, uint16_t handle, uint8_t *data, int len, uint8_t cmd)
     uint16_t uuid = gap->uuid;
     uint8_t flags = gap->flags;
 
-    syslog(LOG_DEBUG, "per_do_write:handle=%d,uuid=%x,flags=%x", handle, uuid, flags);
+    DEBUG("per_do_write: handle=%d,uuid=%x,flags=%x", handle, uuid, flags);
 
     if (uuid == GATT_CLIENT_CHARAC_CFG_UUID) {
         if (len == 2) {
@@ -365,7 +359,7 @@ void per_do_write(int fd, uint16_t handle, uint8_t *data, int len, uint8_t cmd)
                     per_send(fd, &response, sizeof(response));
                 }
             } else {
-                syslog(LOG_ERR, "bad attribute database handle=%d", handle);
+                ERROR("bad attribute database handle=%d", handle);
             }
         } else {
             if (cmd != ATT_OP_WRITE_CMD) {
@@ -397,10 +391,10 @@ void on_peripheral_data(uint8_t *data, ssize_t len, int fd)
 {
     char buf[1024];
     data2hex(buf, sizeof(buf), data, len);
-    syslog(LOG_DEBUG, "on_peripheral_data:data=%s", buf);
+    DEBUG("on_peripheral_data:data=%s", buf);
 
     if (s_attributeSetUpState != ATTR_SETUP_STATE_SET_UP) {
-        syslog(LOG_WARNING, "Attributes have not been set up:attributeSetUpState=%d", s_attributeSetUpState);
+        WARNING("Attributes have not been set up: attributeSetUpState=%d", s_attributeSetUpState);
     }
 
     if (len < 1) {
@@ -418,7 +412,7 @@ void on_peripheral_data(uint8_t *data, ssize_t len, int fd)
                     per_send_err(fd, ATT_OP_FIND_INFO_REQ, start, ATT_ERROR_INVALID_HANDLE);
                     break;
                 }
-                syslog(LOG_DEBUG,"find_info start=%d end=%d", start, end);
+                DEBUG("find_info start=%d end=%d", start, end);
                 per_do_find_info(fd, start, end);
             } else {
                 per_send_err(fd, ATT_OP_READ_BY_TYPE_REQ, 0, ATT_ERROR_INVALID_PDU);
@@ -434,7 +428,7 @@ void on_peripheral_data(uint8_t *data, ssize_t len, int fd)
                 }
                 if (len == 7) {
                     uint16_t uuid = data[5] + (data[6] << 8);
-                    syslog(LOG_DEBUG,"read_by_type start=%d end=%d uuid=%d", start, end, uuid);
+                    DEBUG("read_by_type start=%d end=%d uuid=%d", start, end, uuid);
                     per_do_read_by_type(fd, start, end, uuid);
                 } else if (len == 21) {
                     if (!memcmp(&data[5], g_gattAferoUuidPreamble, sizeof(g_gattAferoUuidPreamble)) &&
@@ -472,7 +466,7 @@ void on_peripheral_data(uint8_t *data, ssize_t len, int fd)
             break;
 
         case ATT_OP_READ_REQ :
-            syslog(LOG_DEBUG, "read");
+            DEBUG("read");
             /* TODO implement this in case someone does a read on the client config attribute */
             break;
 
@@ -482,7 +476,7 @@ void on_peripheral_data(uint8_t *data, ssize_t len, int fd)
                 uint16_t end = data[3] + (data[4] << 8);
                 if (len == 7) {
                     uint16_t uuid = data[5] + (data[6] << 8);
-                    syslog(LOG_DEBUG, "read_by_group_type:start=%d,end=%d,uuid=%x", start, end, uuid);
+                    DEBUG("read_by_group_type: start=%d,end=%d,uuid=%x", start, end, uuid);
                     if (uuid == GATT_PRIM_SVC_UUID) {
                         /* we only support one service */
                         if (start == 1 && end >= start) {
@@ -500,10 +494,10 @@ void on_peripheral_data(uint8_t *data, ssize_t len, int fd)
                         }
                     } else {
                         /* not implemented */
-                        syslog(LOG_ERR, "read by group for other UUIDs not implemented uuid=%d", uuid);
+                        ERROR("read by group for other UUIDs not implemented uuid=%d", uuid);
                     }
                 } else if (len == 21) {
-                    syslog(LOG_ERR, "read_by_group_type_long_not_implemented:start=%d,end=%d", start, end);
+                    ERROR("read_by_group_type_long_not_implemented:start=%d,end=%d", start, end);
                 } else {
                     per_send_err(fd, cmd, 0, ATT_ERROR_INVALID_PDU);
                 }
@@ -522,7 +516,7 @@ void on_peripheral_data(uint8_t *data, ssize_t len, int fd)
                 size_t value_len = len - 7;
 
                 data2hex(buf, sizeof(buf), value, value_len);
-                syslog(LOG_DEBUG, "find_by_type_value start=%04x end=%04x type=%04x value=%s", start, end, type, buf);
+                DEBUG("find_by_type_value start=%04x end=%04x type=%04x value=%s", start, end, type, buf);
 
                 if (check_start_end(start, end) != 0) {
                     per_send_err(fd, ATT_OP_READ_BY_TYPE_REQ, start, ATT_ERROR_INVALID_HANDLE);

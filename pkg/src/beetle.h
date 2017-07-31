@@ -61,8 +61,6 @@ COMMANDS
 
 #undef ENTRY
 
-extern int g_debug;
-
 typedef int (*session_function_t)(int clientFd, bhci_t *bhci);
 
 #define SESSION_SWITCH_SESSION  -1

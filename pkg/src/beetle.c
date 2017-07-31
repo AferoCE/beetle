@@ -27,7 +27,6 @@
 #include <time.h>
 #include <fcntl.h>
 #include <stdarg.h>
-#include <syslog.h>
 #include <getopt.h>
 
 #include <sys/poll.h>
@@ -38,13 +37,14 @@
 #include <bluetooth/bluetooth.h>
 
 #include "beetle.h"
-#include "command.h"
-#include "devicelist.h"
-#include "connlist.h"
-#include "hci_beetle.h"
-#include "utils.h"
 #include "central.h"
+#include "command.h"
+#include "connlist.h"
+#include "devicelist.h"
+#include "hci_beetle.h"
+#include "log.h"
 #include "peripheral.h"
+#include "utils.h"
 
 #include "build_info.h"
 
@@ -63,8 +63,6 @@ session_type_t get_session_type(void)
 static int s_clientFd  = -1;   /* client socket                    */
 static int s_signal    = 0;    /* the signal that occurred         */
 static int s_port = DEFAULT_PORT;
-
-int g_debug = 2;        /* enable debug messages by default */
 
 #define SET_SCAN_ENABLE_TIMEOUT         5000
 #define SET_ADVERTISE_ENABLE_TIMEOUT    5000
@@ -90,9 +88,7 @@ int send_cmd(char *fmt, ...)
     va_end(va);
 
     /* don't log advertisements */
-    if ((buf[0] != 'a' || s_sessionType == peripheralSession) && g_debug >= 1) {
-        syslog(LOG_DEBUG, "<%s", buf);
-    }
+    if (buf[0] != 'a' || s_sessionType == peripheralSession) TRACE("<%s", buf);
 
     int res = write (s_clientFd, buf, len);
     if (res < 0) {
@@ -104,7 +100,7 @@ int send_cmd(char *fmt, ...)
 /* handle debug command */
 int cmd_debug(void *param1, void *param2, void *param3, void *context)
 {
-    g_debug = *(int *)param1;
+    g_debugging = *(int *)param1;
     send_cmd("deb %04x", STATUS_OK);
     return 0;
 }
@@ -136,27 +132,26 @@ int cmd_mode(void *param1, void *param2, void *param3, void *context)
     return retVal;
 }
 
-static int set_up_listener(void)
-{
+static int set_up_listener(void) {
     struct sockaddr_in servaddr;
 
     /* create the socket */
     int listenFd = socket(AF_INET, SOCK_STREAM, 0);
     if (listenFd < 0) {
-        log_failure("echo server socket");
+        log_failure("socket");
         return -1;
     }
 
     int optval = 1;
     if (setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, (const void *)&optval, sizeof(int)) < 0) {
-        log_failure("echo server setsockopt");
+        log_failure("setsockopt");
         close(listenFd);
         return -1;
     }
 
     memset(&servaddr,0, sizeof(servaddr));
     servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    servaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     servaddr.sin_port = htons(s_port);
 
     if (bind(listenFd, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
@@ -170,7 +165,7 @@ static int set_up_listener(void)
         close(listenFd);
         return -1;
     }
-    syslog(LOG_INFO,"listening...");
+    INFO("listening on port %d", s_port);
     return listenFd;
 }
 
@@ -185,7 +180,7 @@ static int accept_connection(int listenFd)
         return -1;
     }
 
-    syslog(LOG_INFO, "Connection from %s", inet_ntoa(clientaddr.sin_addr));
+    INFO("Connection from %s", inet_ntoa(clientaddr.sin_addr));
 
     return clientFd;
 }
@@ -221,33 +216,14 @@ static void setup_signals(void) {
     sigaction(SIGUSR1, &siginfo, NULL);
 }
 
-#define PID_FILE_PATH "/var/run/beetle.pid"
-
-static void usage(void)
-{
-    fprintf(stderr, "usage -- beetle [options][-p <port>][-d][-v]\n");
+static void usage(void) {
+    fprintf(stderr, "usage -- beetle [options]\n");
     fprintf(stderr, "  -v               show version info and exit\n");
     fprintf(stderr, "  -i <interface>   set hci interface (example: hci0)\n");
     fprintf(stderr, "  -m {cen|per}     set start up mode (central or peripheral)\n");
     fprintf(stderr, "  -p <port#>       set listen port\n");
     fprintf(stderr, "  -d               run in background (daemon)\n");
-}
-
-static int do_session(session_function_t sessionFn, int clientFd, bhci_t *bhci)
-{
-    int i;
-    for (i = 0; i < MAX_OPEN_ATTEMPTS; i++) {
-        int ret = (sessionFn)(clientFd, bhci);
-
-        syslog(LOG_DEBUG, "ret=%d", ret);
-        if (ret != SESSION_FAILED_NONFATAL) {
-            return ret;
-        }
-
-        sleep(OPEN_ATTEMPT_DELAY);
-    }
-    syslog(LOG_ERR, "Unable to start session after %d tries; giving up", i);
-    return SESSION_FAILED_FATAL;
+    fprintf(stderr, "  -D               increase debug log level\n");
 }
 
 int main(int argc, char* const argv[])
@@ -257,12 +233,18 @@ int main(int argc, char* const argv[])
     char *interface = NULL;
     int dev = -1;
 
-    while ((opt = getopt(argc, argv, "vdm:i:p:")) != -1) {
+    while ((opt = getopt(argc, argv, "Ddi:m:p:qv")) != -1) {
         switch (opt) {
-            case 'd' :
+            case 'D':
+                debug_level_increase();
+                break;
+            case 'd':
                 daemonize = 1;
                 break;
-            case 'm' :
+            case 'i':
+                interface = optarg;
+                break;
+            case 'm':
                 if (!strncasecmp(optarg, CENTRAL_NAME, sizeof(CENTRAL_NAME) - 1)) {
                     s_defaultSessionType = centralSession;
                 } else if (!strncasecmp(optarg, PERIPHERAL_NAME, sizeof(PERIPHERAL_NAME) - 1)) {
@@ -272,31 +254,30 @@ int main(int argc, char* const argv[])
                     exit(1);
                 }
                 break;
-            case 'p' :
+            case 'p':
                 s_port = atoi(optarg);
                 if (s_port < 1024 || s_port > 65535) {
                     fprintf(stderr, "port must be between 1024 and 65535; falling back to default %d\n", DEFAULT_PORT);
                 }
                 break;
-            case 'i' :
-                interface = optarg;
+            case 'q':
+                debug_level_decrease();
                 break;
             case 'v':
                 fprintf(stderr, "beetle %s %s\n", BUILD_DATE, REVISION);
                 exit(0);
                 break;
-            default :
+            default:
                 usage();
                 exit(1);
                 break;
         }
     }
 
-    /* TODO set up pid file to guard against multiple invocations */
     if (daemonize) {
         pid_t pid = fork();
         if (pid < 0) {
-            syslog(LOG_ERR, "fork failed errno=%d", errno);
+            log_failure("fork failed");
             exit(1);
         } else if (pid != 0) {
             exit(0);
@@ -304,7 +285,7 @@ int main(int argc, char* const argv[])
     }
 
     openlog("beetle", LOG_PID | LOG_NDELAY, LOG_USER);
-    syslog(LOG_INFO, "beetle starting up: %s %s", BUILD_DATE, REVISION);
+    INFO("beetle starting up: %s %s", BUILD_DATE, REVISION);
 
     setup_signals();
 
@@ -331,11 +312,11 @@ int main(int argc, char* const argv[])
                 int ret;
 
                 if (s_sessionType == centralSession) {
-                    ret = do_session(central_session, s_clientFd, &bhci);
+                    ret = central_session(s_clientFd, &bhci);
                 } else if (s_sessionType == peripheralSession) {
-                    ret = do_session(peripheral_session, s_clientFd, &bhci);
+                    ret = peripheral_session(s_clientFd, &bhci);
                 } else {
-                    syslog(LOG_ERR, "unknown session type %d", s_sessionType);
+                    ERROR("unknown session type %d", s_sessionType);
                     ret = SESSION_FAILED_FATAL;
                     break;
                 }
@@ -345,7 +326,7 @@ int main(int argc, char* const argv[])
                 }
             }
 
-            syslog(LOG_INFO, "Disconnecting");
+            INFO("Disconnecting");
             close(s_clientFd);
         }
 

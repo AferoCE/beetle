@@ -21,6 +21,8 @@ beetle_SOURCES = \
     evloop.h                \
     hci_beetle.c            \
     hci_beetle.h            \
+    log.c                   \
+    log.h                   \
     peripheral.c            \
     peripheral.h            \
     utils.c                 \

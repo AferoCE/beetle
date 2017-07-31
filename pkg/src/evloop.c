@@ -1,10 +1,10 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include <syslog.h>
 
 #include "beetle.h"
 #include "evloop.h"
+#include "log.h"
 #include "utils.h"
 
 #define DEFAULT_FD_SIZE 4

@@ -2,7 +2,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <syslog.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -14,6 +13,7 @@
 
 #include "beetle.h"
 #include "hci_beetle.h"
+#include "log.h"
 #include "utils.h"
 
 #define MAX_KILLED_CONNECTIONS 16
@@ -147,7 +147,7 @@ int bhci_kill_all_connections(bhci_t *bhci) {
     for (i = 0; i < cl->conn_num; i++) {
         char addr[18];
         addr2str(&cl->conn_info[i].bdaddr, addr);
-        syslog(LOG_INFO, "Disconnecting %s", addr);
+        INFO("Disconnecting %s", addr);
         bhci_disconnect(bhci, btohs(cl->conn_info[i].handle));
     }
 
@@ -263,9 +263,7 @@ int bhci_set_advertising_data(bhci_t *bhci, uint8_t *data, int len) {
 
 /* open a non-blocking L2CAP socket to a device */
 int bhci_l2cap_connect(const char* addr, int cid, int addr_type) {
-    if (g_debug >= 1) {
-        syslog(LOG_DEBUG, "bhci_l2cap_connect: %s %d", addr, addr_type);
-    }
+    DEBUG("bhci_l2cap_connect: %s %d", addr, addr_type);
 
     int fd = socket(PF_BLUETOOTH, SOCK_SEQPACKET | SOCK_NONBLOCK, BTPROTO_L2CAP);
     if (fd < 0) {
@@ -308,7 +306,7 @@ void bhci_read(bhci_t *bhci) {
         return;
     }
     if (len < 3) {
-        syslog(LOG_ERR, "ignoring truncated bluetooth packet (len=%zi)", len);
+        ERROR("ignoring truncated bluetooth packet (len=%zi)", len);
         return;
     }
 
@@ -321,14 +319,14 @@ void bhci_read(bhci_t *bhci) {
         case EVT_CMD_STATUS:
             if (data_len >= sizeof(evt_cmd_status)) {
                 evt_cmd_status *status = data;
-                syslog(LOG_DEBUG, "evt_cmd_status %02x %04x", status->status, htobs(status->opcode));
+                DEBUG("evt_cmd_status %02x %04x", status->status, htobs(status->opcode));
             }
             break;
 
         case EVT_CMD_COMPLETE:
             if (data_len >= sizeof(evt_cmd_complete)) {
                 evt_cmd_complete *cc = data;
-                syslog(LOG_DEBUG, "evt_cmd_complete %02x %04x", cc->ncmd, htobs(cc->opcode));
+                DEBUG("evt_cmd_complete %02x %04x", cc->ncmd, htobs(cc->opcode));
             }
             break;
 
@@ -341,7 +339,7 @@ void bhci_read(bhci_t *bhci) {
                     data += 2, len -= 2;
                     uint16_t completed = btohs(*(uint16_t *)data);
                     data += 2, len -= 2;
-                    syslog(LOG_DEBUG, "completed packet handle=%i count=%i", handle, completed);
+                    DEBUG("completed packet handle=%i count=%i", handle, completed);
                 }
             }
             break;
@@ -349,7 +347,7 @@ void bhci_read(bhci_t *bhci) {
         case EVT_DISCONN_COMPLETE:
             if (data_len >= sizeof(evt_disconn_complete)) {
                 evt_disconn_complete *disconn = data;
-                syslog(LOG_INFO, "DISCONNECT hci_handle=%d status=0x%02x reason=0x%02x",
+                DEBUG("DISCONNECT hci_handle=%d status=0x%02x reason=0x%02x",
                     btohs(disconn->handle), disconn->status, disconn->reason);
                 if (bhci->on_disconnect) bhci->on_disconnect(bhci, disconn, bhci->on_disconnect_arg);
             }
@@ -365,7 +363,7 @@ void bhci_read(bhci_t *bhci) {
                             evt_le_connection_complete *conn = data;
                             char addr[BT_ADDR_SIZE];
                             addr2str(&conn->peer_bdaddr, addr);
-                            syslog(LOG_INFO, "LE_CONNECT: addr=%s handle=%d", addr, btohs(conn->handle));
+                            DEBUG("LE_CONNECT: addr=%s handle=%d", addr, btohs(conn->handle));
                             if (bhci->on_connect) bhci->on_connect(bhci, conn, addr, bhci->on_connect_arg);
                         }
                         break;
@@ -376,19 +374,18 @@ void bhci_read(bhci_t *bhci) {
 
                     case EVT_LE_READ_REMOTE_USED_FEATURES_COMPLETE:
                         if (data_len >= sizeof(evt_le_read_remote_used_features_complete)) {
-                            evt_le_read_remote_used_features_complete *features = data;
-                            syslog(LOG_DEBUG, "connect complete status=%i handle=%i",
-                                features->status, btohs(features->handle));
+                            evt_le_read_remote_used_features_complete *feat = data;
+                            DEBUG("connect complete status=0x%02x handle=%i", feat->status, btohs(feat->handle));
                         }
                         break;
 
                     default:
-                        syslog(LOG_DEBUG, "hci %s", data2hex(hex_data, sizeof(hex_data), buffer, len));
+                        TRACE("hci %s", data2hex(hex_data, sizeof(hex_data), buffer, len));
                 }
             }
             break;
 
         default:
-            syslog(LOG_DEBUG, "hci %s", data2hex(hex_data, sizeof(hex_data), buffer, len));
+            TRACE("hci %s", data2hex(hex_data, sizeof(hex_data), buffer, len));
     }
 }

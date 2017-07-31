@@ -17,14 +17,13 @@
  *
  *******************************************************************************/
 
-#include <syslog.h>
 #include <string.h>
 #include <errno.h>
 #include <stdlib.h>
-#include "devicelist.h"
-#include "utils.h"
 
-extern int g_debug;
+#include "devicelist.h"
+#include "log.h"
+#include "utils.h"
 
 #define MAX_DEVICES 1024
 static int s_numDevices=0;
@@ -91,7 +90,7 @@ device_info_t *dl_add_device(char *addr, char addr_type)
 
         device_info_t *di = calloc(1, sizeof(device_info_t));
         if (di == NULL) {
-            syslog(LOG_ERR, "Can't add device %s: memory is full", addr);
+            ERROR("Can't add device %s: memory is full", addr);
             return NULL;
         }
 
@@ -109,14 +108,11 @@ device_info_t *dl_add_device(char *addr, char addr_type)
         di->lastSeen = get_mono_time();
 
         s_numDevices++;
-
-        if (g_debug >= 1) {
-            syslog(LOG_DEBUG, "Added addr=%s, type=%d, numDevices=%d", addr, addr_type, s_numDevices);
-        }
+        DEBUG("Added addr=%s, type=%d, numDevices=%d", addr, addr_type, s_numDevices);
         return di;
     }
 
-    syslog(LOG_ERR, "Can't add device %s: device list is full", addr);
+    ERROR("Can't add device %s: device list is full", addr);
     return NULL;
 }
 
@@ -125,13 +121,13 @@ kattribute_t *dl_find_attr(device_info_t *di, int attr)
     kattribute_t *ka;
 
     if (di == NULL) {
-        syslog(LOG_ERR,"di == NULL");
+        ERROR("di == NULL");
         return NULL;
     }
 
     ka = di->attributes;
     if (ka == NULL) {
-        syslog(LOG_ERR,"ka == NULL");
+        ERROR("ka == NULL");
         return NULL;
     }
 
@@ -142,7 +138,7 @@ kattribute_t *dl_find_attr(device_info_t *di, int attr)
         ka++;
     }
 
-    syslog(LOG_ERR,"attr %d not found", attr);
+    ERROR("attr %d not found", attr);
     return NULL;
 }
 
@@ -160,9 +156,7 @@ static void cull_devices(void)
     for (i = 0; i < s_numDevices; i++) {
         if (s_devices[i]->lastSeen < expireTime) {
             numExpired++;
-            if (g_debug >= 1) {
-                syslog(LOG_INFO, "expiring addr=%s, numDevices=%d", s_devices[i]->addr, s_numDevices - numExpired);
-            }
+            INFO("expiring addr=%s, numDevices=%d", s_devices[i]->addr, s_numDevices - numExpired);
             free(s_devices[i]);
         } else {
             if (i != store) {
@@ -184,13 +178,13 @@ void dl_expire_devices(void)
 }
 
 void dl_debug(void) {
-    syslog(LOG_DEBUG, "--- Device list:");
+    DEBUG("--- Device list:");
     time_t now = get_mono_time();
     int i;
     for (i = 0; i < s_numDevices; i++) {
         device_info_t *device = s_devices[i];
         int seconds_ago = now - s_devices[i]->lastSeen;
-        syslog(LOG_DEBUG, "device %03i: %s age=%i rssi=%i", i, device->addr, seconds_ago, device->rssi);
+        DEBUG("device %03i: %s age=%i rssi=%i", i, device->addr, seconds_ago, device->rssi);
     }
-    syslog(LOG_DEBUG, "--- End of device list");
+    DEBUG("--- End of device list");
 }
