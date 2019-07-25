@@ -1,6 +1,6 @@
 /********************************************************************************
  *
- * Copyright (c) 2016 Afero, Inc.
+ * Copyright 2016-2017 Afero, Inc.
  *
  * Licensed under the MIT license (the "License"); you may not use this file
  * except in compliance with the License.  You may obtain a copy of the License
@@ -20,6 +20,7 @@
 #ifndef __PERIPHERAL_SESSION_H__
 #define __PERIPHERAL_SESSION_H__
 
+#include "evloop.h"
 #include "hci_beetle.h"
 
 struct peripheral_context {
@@ -33,6 +34,7 @@ struct peripheral_context {
     char addr[BT_ADDR_SIZE];
 
     bhci_t *bhci;
+    evloop_t *ev;
 };
 
 int peripheral_session(int client_fd, bhci_t *bhci);

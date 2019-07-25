@@ -1,6 +1,6 @@
 /********************************************************************************
  *
- * Copyright (c) 2016 Afero, Inc.
+ * Copyright 2016-2017 Afero, Inc.
  *
  * Licensed under the MIT license (the "License"); you may not use this file
  * except in compliance with the License.  You may obtain a copy of the License
@@ -50,10 +50,11 @@
     ENTRY(WRITE,"wri","iis",cmd_write,central) \
     ENTRY(READ,"rea","ii",cmd_read,central) \
     ENTRY(NOTIFY_ENABLE,"nen","iii",cmd_notify_enable,central) \
+    ENTRY(SHH,"shh","",cmd_quiet,central) \
     ENTRY(PER_ADVERTISEMENT,"pad","iis",cmd_per_advertisement,peripheral) \
     ENTRY(PER_NOTIFY,"pin","is",cmd_per_indicate,peripheral) \
-    ENTRY(PER_KATTRIBUTE,"pka","ii",cmd_per_kattribute,peripheral)
-
+    ENTRY(PER_KATTRIBUTE,"pka","ii",cmd_per_kattribute,peripheral) \
+    ENTRY(PER_DISCONNECT, "pdi", "", cmd_per_disconnect, peripheral)
 
 #define ENTRY(ww,xx,yy,zz,aa) int zz(void *param1, void *param2, void *param3, void *context);
 
@@ -63,9 +64,10 @@ COMMANDS
 
 typedef int (*session_function_t)(int clientFd, bhci_t *bhci);
 
-#define SESSION_SWITCH_SESSION  -1
-#define SESSION_FAILED_NONFATAL -2
-#define SESSION_FAILED_FATAL    -3
+#define SESSION_SWITCH_SESSION      -1
+#define SESSION_FAILED_NONFATAL     -2
+#define SESSION_FAILED_FATAL        -3
+#define SESSION_REBUILD_BLUETOOTH   -4
 
 typedef enum {
     eitherSession = 0,

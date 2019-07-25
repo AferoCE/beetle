@@ -4,6 +4,27 @@ beetle
 Beetle is a small daemon that provides simplified access to a bluetooth interface. It listens on a local port (usually 6969) and uses a line-oriented text protocol described in detail in the [commands list](docs/commands.md).
 
 
+## Building
+
+There are three ways to build beetle:
+
+1. yocto (cross-compiled for raspi)
+
+    $ cd ../rpi-build; bitbake beetle
+
+2. cmake (local Linux)
+
+    $ ./build-linux-x86.sh
+
+3. autoconf (local Linux)
+
+    $ ./build-local.sh
+
+If you've built using autoconf recently, you may need to `cd pkg; make distclean` before doing another yocto build.
+
+The local builds deposit a `beetle` in `pkg/src/`. The yocto build deposits it in your yocto build folder.
+
+
 ## Code layout
 
 There are two fundamental "modes" for beetle:

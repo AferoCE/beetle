@@ -1,6 +1,6 @@
 /********************************************************************************
  *
- * Copyright (c) 2016 Afero, Inc.
+ * Copyright 2016-2017 Afero, Inc.
  *
  * Licensed under the MIT license (the "License"); you may not use this file
  * except in compliance with the License.  You may obtain a copy of the License
@@ -111,6 +111,7 @@ int cmd_per_kattribute(void *param1, void *param2, void *param3, void *data)
     }
 
     send_cmd("pka %04x %04x %04x", kattr, flags, STATUS_OK);
+    return 0;
 }
 
 static inline int uuid_size(uint16_t uuid)
@@ -331,6 +332,7 @@ int cmd_per_indicate(void *param1, void *param2, void *param3, void *data)
             break;
         }
     }
+    return 0;
 }
 
 void per_do_write(int fd, uint16_t handle, uint8_t *data, int len, uint8_t cmd)
@@ -434,7 +436,7 @@ void on_peripheral_data(uint8_t *data, ssize_t len, int fd)
                     if (!memcmp(&data[5], g_gattAferoUuidPreamble, sizeof(g_gattAferoUuidPreamble)) &&
                         data[19] == 0x5a &&
                         data[20] == 0x7a) {
-                        uint16_t uuid = data[17] + data[18] << 8;
+                        uint16_t uuid = data[17] + (data[18] << 8);
                         per_do_read_by_type(fd, start, end, uuid);
                     } else {
                         per_send_err(fd, ATT_OP_READ_BY_TYPE_REQ, start, ATT_ERROR_ATTRIBUTE_NOT_FOUND);

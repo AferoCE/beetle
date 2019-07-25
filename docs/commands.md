@@ -20,6 +20,11 @@ An attempt to document the bettle commands and responses.
 
 ## Requests (central mode)
 
+- `shh`
+
+  toggle "quiet mode", which hides `adv` messages -- these can be a flood
+  sometimes when operating beetle manually
+
 - `con <periph_id>`
 
   connect to a peripheral by hardware ID (colon-delimited hex)
@@ -71,6 +76,12 @@ An attempt to document the bettle commands and responses.
 
   response: `pka <attr#> <flags#> <status#>`
 
+- `pdi`
+
+  disconnect any bluetooth peer (hub)
+
+  response: `pdi [addr]`
+
 
 ## Events (central mode)
 
@@ -83,6 +94,10 @@ An attempt to document the bettle commands and responses.
   peripheral disconnected (possibly by request, possibly spuriously)
 
 - `not <fd#> <attr#> <hex>`
+
+- `shh <value>`
+
+  1 if quiet mode is active, 0 if not
 
 
 ## Events (peripheral mode)

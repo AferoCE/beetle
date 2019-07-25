@@ -1,6 +1,6 @@
 /********************************************************************************
  *
- * Copyright (c) 2016 Afero, Inc.
+ * Copyright 2016-2017 Afero, Inc.
  *
  * Licensed under the MIT license (the "License"); you may not use this file
  * except in compliance with the License.  You may obtain a copy of the License
@@ -54,11 +54,29 @@
 
 static int s_advertising = 0;
 
+/* disconnect any client */
+int cmd_per_disconnect(void *param1, void *param2, void *param3, void *arg) {
+    struct peripheral_context *context = arg;
+    if (context->connection_fd >= 0) {
+        INFO("disconnecting %s", context->addr);
+        close(context->connection_fd);
+        evloop_cancel_read(context->ev, context->connection_fd);
+        context->connection_fd = -1;
+        send_cmd("pdi %s", context->addr);
+        context->addr[0] = 0;
+    } else {
+        send_cmd("pdi");
+    }
+
+    if (s_advertising) bhci_enable_advertising(context->bhci);
+    return 0;
+}
+
 /* construct advertising data */
 int cmd_per_advertisement(void *param1, void *param2, void *param3, void *arg) {
     uint8_t flags = (uint8_t)*(int *)param1;
     uint16_t appearance = (uint16_t)*(int *)param2;
-    uint8_t *data = (char *)param3;
+    char *data = (char *)param3;
     struct peripheral_context *context = arg;
 
     uint8_t mfgData[32];
@@ -66,7 +84,7 @@ int cmd_per_advertisement(void *param1, void *param2, void *param3, void *arg) {
         send_cmd("pad %04x", STATUS_BAD_PARAM);
         return 0;
     }
-    int len = hex2data ((char *)param3, mfgData, sizeof(mfgData));
+    int len = hex2data(data, mfgData, sizeof(mfgData));
 
     uint8_t i = 0;
 
@@ -98,14 +116,6 @@ int cmd_per_advertisement(void *param1, void *param2, void *param3, void *arg) {
     return 0;
 }
 
-static void handle_disconnect(struct bhci *bhci, evt_disconn_complete *disconn, void *arg) {
-    /*
-     * sometimes, we seem to get a rapid connect/disconnect that doesn't
-     * trigger accept(). make sure we're still advertizing.
-     */
-    if (s_advertising) bhci_enable_advertising(bhci);
-}
-
 static evloop_handler_result_t handle_hci_read(evloop_t *ev, int fd, void *arg) {
     bhci_read((bhci_t *) arg);
     return EL_CONTINUE;
@@ -129,36 +139,52 @@ static evloop_handler_result_t handle_connection_read(evloop_t *ev, int fd, void
         close(fd);
         context->connection_fd = -1;
         send_cmd("pdi %s", context->addr);
+        context->addr[0] = 0;
         if (s_advertising) bhci_enable_advertising(context->bhci);
         return EL_STOP;
     }
 
     if (len < 0) {
         log_failure("read peripheral");
-        return EL_CONTINUE;
+        return ((errno == EAGAIN || errno == EBUSY) ? EL_CONTINUE : EL_STOP);
     }
 
     on_peripheral_data(buffer, len, context->connection_fd);
     return EL_CONTINUE;
 }
 
-static evloop_handler_result_t handle_listener_read(evloop_t *ev, int fd, void *arg) {
+static evloop_handler_result_t handle_listener_read(evloop_t *ev, int listen_fd, void *arg) {
     struct peripheral_context *context = arg;
-
-    if (context->connection_fd >= 0) close(context->connection_fd);
 
     struct sockaddr_l2 addr;
     socklen_t len = sizeof(addr);
-    context->connection_fd = accept(fd, (struct sockaddr *)&addr, &len);
-    if (context->connection_fd < 0) {
+    int fd = accept(listen_fd, (struct sockaddr *)&addr, &len);
+    if (fd < 0) {
         log_failure("accept");
         return EL_CONTINUE;
     }
+
+    if (s_advertising) bhci_enable_advertising(context->bhci);
+
+    if (context->connection_fd >= 0) {
+        DEBUG("extra hub connection when we already have one: killing it");
+        close(fd);
+        return EL_CONTINUE;
+    }
+    context->connection_fd = fd;
+
     ba2str(&addr.l2_bdaddr, context->addr);
     send_cmd("pco %s", context->addr);
-    if (s_advertising) bhci_enable_advertising(context->bhci);
-    evloop_on_read(ev, context->connection_fd, handle_connection_read, context);
+    evloop_on_read(ev, fd, handle_connection_read, context);
     return EL_CONTINUE;
+}
+
+static void handle_disconnect(struct bhci *bhci, evt_disconn_complete *disconn, void *arg) {
+    /*
+     * sometimes, we seem to get a rapid connect/disconnect that doesn't
+     * trigger accept(). make sure we're still advertising.
+     */
+    if (s_advertising) bhci_enable_advertising(bhci);
 }
 
 static evloop_handler_result_t handle_sigusr1(evloop_t *ev, int signal, void *arg) {
@@ -166,11 +192,17 @@ static evloop_handler_result_t handle_sigusr1(evloop_t *ev, int signal, void *ar
     return EL_CONTINUE;
 }
 
+static evloop_handler_result_t handle_sigusr2(evloop_t *ev, int signal, void *arg) {
+    evloop_stop(ev, SESSION_REBUILD_BLUETOOTH);
+    return EL_STOP;
+}
+
 int peripheral_session(int client_fd, bhci_t *bhci) {
     struct peripheral_context context = {
         .listen_fd = bhci_listen(bhci),
         .connection_fd = -1,
-        .bhci = bhci
+        .bhci = bhci,
+        .ev = NULL
     };
 
     if (context.listen_fd < 0) return SESSION_FAILED_NONFATAL;
@@ -187,22 +219,28 @@ int peripheral_session(int client_fd, bhci_t *bhci) {
 
     evloop_t ev;
     evloop_init(&ev);
+    context.ev = &ev;
 
     bhci_clear_callbacks(bhci);
-    bhci_on_disconnect(bhci, handle_disconnect, NULL);
+    bhci_on_disconnect(bhci, handle_disconnect, &context);
 
     evloop_on_read(&ev, bhci->fd, handle_hci_read, bhci);
     evloop_on_read(&ev, context.listen_fd, handle_listener_read, &context);
     evloop_on_read(&ev, client_fd, handle_client_read, &context);
     evloop_on_signal(&ev, SIGUSR1, handle_sigusr1, NULL);
+    evloop_on_signal(&ev, SIGUSR2, handle_sigusr2, NULL);
 
+    bhci_check_interface(bhci);
     if (evloop_run(&ev) != EL_STOPPED) return SESSION_FAILED_FATAL;
 
     INFO("closing peripheral session");
 
     bhci_disable_advertising(bhci);
 
-    if (context.connection_fd >= 0) close(context.connection_fd);
+    if (context.connection_fd >= 0) {
+        close(context.connection_fd);
+        send_cmd("pdi %s", context.addr);
+    }
     close(context.listen_fd);
 
     int result_code = ev.result_code;

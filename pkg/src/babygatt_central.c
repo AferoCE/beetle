@@ -1,6 +1,6 @@
 /********************************************************************************
  *
- * Copyright (c) 2016 Afero, Inc.
+ * Copyright 2016-2017 Afero, Inc.
  *
  * Licensed under the MIT license (the "License"); you may not use this file
  * except in compliance with the License.  You may obtain a copy of the License
@@ -252,8 +252,8 @@ int cmd_write(void *param1, void *param2, void *param3, void *context)
     }
 
     if (!kattr->isNoResponse) {
-    	ci->flags |= CONN_FLAGS_PENDING_OP;
-    	ci->pend_cmd = PENDING_COMMAND_WRITE;
+        ci->flags |= CONN_FLAGS_PENDING_OP;
+        ci->pend_cmd = PENDING_COMMAND_WRITE;
     }
     return 0;
 }
@@ -341,6 +341,22 @@ int cmd_notify_enable(void *param1, void *param2, void *param3, void *context)
     return 0;
 }
 
+void gatt_fail_any_pending(conn_info_t *ci, int error_code) {
+    if (ci->flags & CONN_FLAGS_PENDING_OP) {
+        ci->flags &= ~CONN_FLAGS_PENDING_OP;
+        switch (ci->pend_cmd) {
+            case PENDING_COMMAND_WRITE :
+                send_cmd("wri %04x %04x %04x", ci->l2cap_fd, ci->attr_id, error_code);
+                break;
+            case PENDING_COMMAND_READ :
+                send_cmd("rea %04x %04x %04x", ci->l2cap_fd, ci->attr_id, error_code);
+                break;
+            default :
+                break;
+        }
+    }
+}
+
 void on_central_data(conn_info_t *ci, uint8_t *data, int len)
 {
     int opcode = data[0];
@@ -377,20 +393,9 @@ void on_central_data(conn_info_t *ci, uint8_t *data, int len)
                     ci->flags &= ~CONN_FLAGS_PENDING_OP;
                 }
                     break;
-                default :
-                    if (ci->flags & CONN_FLAGS_PENDING_OP) {
-                        ERROR("error for op code %d, error code %d", data[1], data[4]);
-                        switch (ci->pend_cmd) {
-                            case PENDING_COMMAND_WRITE :
-                                send_cmd("wri %04x %04x %04x", ci->l2cap_fd, ci->attr_id, STATUS_BLUETOOTH_ERROR);
-                                break;
-                            case PENDING_COMMAND_READ :
-                                send_cmd("rea %04x %04x %04x", ci->l2cap_fd, ci->attr_id, STATUS_BLUETOOTH_ERROR);
-                                break;
-                            default :
-                                break;
-                        }
-                    }
+                default:
+                    ERROR("error for op code %d, error code %d", data[1], data[4]);
+                    gatt_fail_any_pending(ci, STATUS_BLUETOOTH_ERROR);
                     break;
             }
             break;

@@ -1,3 +1,22 @@
+/********************************************************************************
+ *
+ * Copyright 2016-2017 Afero, Inc.
+ *
+ * Licensed under the MIT license (the "License"); you may not use this file
+ * except in compliance with the License.  You may obtain a copy of the License
+ * at
+ *
+ * https://opensource.org/licenses/MIT
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ *******************************************************************************/
+
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -16,7 +35,7 @@
 #include "log.h"
 #include "utils.h"
 
-#define MAX_KILLED_CONNECTIONS 16
+#define MAX_CONNECTIONS 16
 
 /*
  * Wrappers for bluetooth HCI
@@ -44,6 +63,14 @@ int bhci_open(bhci_t *bhci, const char *interface_name) {
     return 0;
 }
 
+int bhci_check_interface(bhci_t *bhci) {
+    if (hci_send_cmd(bhci->fd, OGF_LE_CTL, OCF_LE_READ_LOCAL_SUPPORTED_FEATURES, 0, NULL) < 0) {
+        log_failure("read_local_features");
+        return -1;
+    }
+    return 0;
+}
+
 void bhci_clear_callbacks(bhci_t *bhci) {
     bhci->on_disconnect = NULL;
     bhci->on_disconnect_arg = NULL;
@@ -65,7 +92,7 @@ int bhci_set_scan_enable(bhci_t *bhci, uint8_t enable) {
 
     memset(&scan_cp, 0, sizeof(scan_cp));
     scan_cp.enable = enable;
-	scan_cp.filter_dup = 0;
+    scan_cp.filter_dup = 0;
 
     if (hci_send_cmd(bhci->fd, OGF_LE_CTL, OCF_LE_SET_SCAN_ENABLE, sizeof(scan_cp), &scan_cp) < 0) {
         log_failure("bhci_set_scan_enable");
@@ -130,25 +157,73 @@ int bhci_set_scan_parameters(bhci_t *bhci, int interval, int window) {
     return 0;
 }
 
-int bhci_kill_all_connections(bhci_t *bhci) {
-    struct hci_conn_list_req *cl;
-    int i;
+static const char *bhci_conn_state(uint16_t state) {
+    switch (state) {
+        case BT_CONNECTED:
+            return "BT_CONNECTED";
+        case BT_OPEN:
+            return "BT_OPEN";
+        case BT_BOUND:
+            return "BT_BOUND";
+        case BT_LISTEN:
+            return "BT_LISTEN";
+        case BT_CONNECT:
+            return "BT_CONNECT";
+        case BT_CONNECT2:
+            return "BT_CONNECT2";
+        case BT_CONFIG:
+            return "BT_CONFIG";
+        case BT_DISCONN:
+            return "BT_DISCONN";
+        case BT_CLOSED:
+            return "BT_CLOSED";
+        default:
+            return "unknown";
+    }
+}
 
-    cl = (struct hci_conn_list_req *) malloc(MAX_KILLED_CONNECTIONS * sizeof(struct hci_conn_info) + sizeof(*cl));
+static struct hci_conn_list_req *bhci_get_connection_list(bhci_t *bhci) {
+    struct hci_conn_list_req *cl = malloc(MAX_CONNECTIONS * sizeof(struct hci_conn_info) + sizeof(*cl));
     cl->dev_id = 0;
-    cl->conn_num = MAX_KILLED_CONNECTIONS;
-
+    cl->conn_num = MAX_CONNECTIONS;
     if (ioctl(bhci->fd, HCIGETCONNLIST, (void *) cl)) {
         free(cl);
         log_failure("HCIGETCONNLIST");
-        return -1;
+        return NULL;
     }
+    return cl;
+}
 
+int bhci_debug_connections(bhci_t *bhci) {
+    struct hci_conn_list_req *cl = bhci_get_connection_list(bhci);
+    if (!cl) return -1;
+
+    DEBUG("--- HCI connection list:");
+    int i;
     for (i = 0; i < cl->conn_num; i++) {
+        struct hci_conn_info *ci = &cl->conn_info[i];
         char addr[18];
-        addr2str(&cl->conn_info[i].bdaddr, addr);
-        INFO("Disconnecting %s", addr);
-        bhci_disconnect(bhci, btohs(cl->conn_info[i].handle));
+        addr2str(&ci->bdaddr, addr);
+        DEBUG("conn %i: %s handle=%i state=%s", i, addr, btohs(ci->handle), bhci_conn_state(ci->state));
+    }
+    DEBUG("--- End of HCI connection list");
+    free(cl);
+    return 0;
+}
+
+int bhci_kill_all_connections(bhci_t *bhci) {
+    struct hci_conn_list_req *cl = bhci_get_connection_list(bhci);
+    if (!cl) return -1;
+
+    int i;
+    for (i = 0; i < cl->conn_num; i++) {
+        struct hci_conn_info *ci = &cl->conn_info[i];
+        if (ci->state == BT_CONNECTED) {
+            char addr[18];
+            addr2str(&ci->bdaddr, addr);
+            INFO("Disconnecting %s", addr);
+            bhci_disconnect(bhci, btohs(ci->handle));
+        }
     }
 
     free(cl);
@@ -288,11 +363,95 @@ int bhci_l2cap_connect(const char* addr, int cid, int addr_type) {
 
     if (connect(fd, (struct sockaddr *) &sockAddr, sizeof(sockAddr)) < 0) {
         if (errno != EINPROGRESS) {
+            close(fd);
             log_failure("connect");
+            DEBUG("connect failed fd=%i", fd);
             return -1;
         }
     }
     return fd;
+}
+
+static char *ogf_ocf_name(uint16_t ogf, uint16_t ocf, char *buffer, size_t len) {
+#define friendly(_name) strncpy(buffer, _name, len); buffer[len - 1] = 0; break
+    switch (ogf) {
+        case OGF_LINK_CTL:  // 0x01
+            switch (ocf) {
+                case OCF_DISCONNECT:  // 0x006
+                    friendly("DISCONNECT");
+            }
+            break;
+
+        case OGF_LE_CTL:  // 0x08
+            switch (ocf) {
+                case OCF_LE_READ_LOCAL_SUPPORTED_FEATURES:  // 0x003
+                    friendly("READ_LOCAL_SUPPORTED_FEATURES");
+                case OCF_LE_SET_ADVERTISING_PARAMETERS:  // 0x006
+                    friendly("SET_ADVERTISING_PARAMETERS");
+                case OCF_LE_SET_ADVERTISING_DATA:  // 0x008
+                    friendly("SET_ADVERTISING_DATA");
+                case OCF_LE_SET_ADVERTISE_ENABLE:  // 0x00a
+                    friendly("SET_ADVERTISE_ENABLE");
+                case OCF_LE_SET_SCAN_PARAMETERS:  // 0x00b
+                    friendly("SET_SCAN_PARAMETERS");
+                case OCF_LE_SET_SCAN_ENABLE:  // 0x00c
+                    friendly("SET_SCAN_ENABLE");
+                case OCF_LE_CREATE_CONN:  // 0x00d
+                    friendly("CREATE_CONN");
+                case OCF_LE_CREATE_CONN_CANCEL:  // 0x00e
+                    friendly("CREATE_CONN_CANCEL");
+                case OCF_LE_ADD_DEVICE_TO_WHITE_LIST:  // 0x011
+                    friendly("ADD_DEVICE_TO_WHITE_LIST");
+                case OCF_LE_REMOVE_DEVICE_FROM_WHITE_LIST:  // 0x012
+                    friendly("REMOVE_DEVICE_FROM_WHITE_LIST");
+                case OCF_LE_READ_REMOTE_USED_FEATURES:  // 0x016
+                    friendly("READ_REMOTE_USED_FEATURES");
+                default:
+                    snprintf(buffer, len, "ogf=0x%02x ocf=0x%03x", ogf, ocf);
+            }
+            break;
+
+        default:
+            snprintf(buffer, len, "ogf=0x%02x ocf=0x%03x", ogf, ocf);
+    }
+
+#undef friendly
+
+    return buffer;
+}
+
+static void process_response(uint16_t ogf, uint16_t ocf, void *data, int data_len) {
+    switch (ogf) {
+        case OGF_LE_CTL:
+            switch (ocf) {
+                case OCF_LE_READ_LOCAL_SUPPORTED_FEATURES:
+                    if (data_len >= sizeof(le_read_local_supported_features_rp)) {
+                        le_read_local_supported_features_rp *msg = data;
+                        char features[256];
+                        features[0] = 0;
+                        if (msg->status != 0) strcat(features, "REQUEST FAILED");
+                        if ((msg->features[0] & LE_FEATURE_ENCRYPTION) != 0) strcat(features, "encrypt ");
+                        if ((msg->features[0] & LE_FEATURE_CONNECTION_PARAMETERS) != 0) strcat(features, "conn-params ");
+                        if ((msg->features[0] & LE_FEATURE_EXTENDED_REJECT) != 0) strcat(features, "reject ");
+                        if ((msg->features[0] & LE_FEATURE_FEATURES_EXCHANGE) != 0) strcat(features, "features-exchange ");
+                        if ((msg->features[0] & LE_FEATURE_PING) != 0) strcat(features, "ping ");
+                        if ((msg->features[0] & LE_FEATURE_DATA_LENGTH) != 0) strcat(features, "data-length ");
+                        if ((msg->features[0] & LE_FEATURE_PRIVACY) != 0) strcat(features, "privacy ");
+                        if ((msg->features[0] & LE_FEATURE_SCANNER_FILTER) != 0) strcat(features, "scanner-filter ");
+                        if ((msg->features[1] & (LE_FEATURE_2M_PHY >> 8)) != 0) strcat(features, "2m-phy ");
+                        if ((msg->features[1] & (LE_FEATURE_TRANSMIT_SMI >> 8)) != 0) strcat(features, "transmit-smi ");
+                        if ((msg->features[1] & (LE_FEATURE_RECEIVE_SMI >> 8)) != 0) strcat(features, "receive-smi ");
+                        if ((msg->features[1] & (LE_FEATURE_CODED_PHY >> 8)) != 0) strcat(features, "coded-phy ");
+                        if ((msg->features[1] & (LE_FEATURE_ADVERTISING >> 8)) != 0) strcat(features, "adv ");
+                        if ((msg->features[1] & (LE_FEATURE_PERIODIC_ADVERTISING >> 8)) != 0) strcat(features, "periodic-adv ");
+                        if ((msg->features[1] & (LE_FEATURE_CHANNEL_SELECTION >> 8)) != 0) strcat(features, "channel-select ");
+                        if ((msg->features[1] & (LE_FEATURE_POWER_CLASS_1 >> 8)) != 0) strcat(features, "power1 ");
+                        INFO("HCI interface supports features: %s", features);
+                    }
+                    break;
+            }
+            break;
+    }
 }
 
 /* call me when the HCI socket polls as "readable" */
@@ -319,14 +478,25 @@ void bhci_read(bhci_t *bhci) {
         case EVT_CMD_STATUS:
             if (data_len >= sizeof(evt_cmd_status)) {
                 evt_cmd_status *status = data;
-                DEBUG("evt_cmd_status %02x %04x", status->status, htobs(status->opcode));
+                /* opcode: (OGF << 10) | OCF */
+                uint16_t ogf = (btohs(status->opcode) >> 10) & 0x3f;
+                uint16_t ocf = btohs(status->opcode) & 0x3ff;
+                DEBUG("evt_cmd_status %s status=0x%02x",
+                  ogf_ocf_name(ogf, ocf, hex_data, sizeof(hex_data)), status->status);
             }
             break;
 
         case EVT_CMD_COMPLETE:
             if (data_len >= sizeof(evt_cmd_complete)) {
                 evt_cmd_complete *cc = data;
-                DEBUG("evt_cmd_complete %02x %04x", cc->ncmd, htobs(cc->opcode));
+                /* opcode: (OGF << 10) | OCF */
+                uint16_t ogf = (btohs(cc->opcode) >> 10) & 0x3f;
+                uint16_t ocf = btohs(cc->opcode) & 0x3ff;
+                DEBUG("evt_cmd_complete %s ncmd=0x%02x",
+                  ogf_ocf_name(ogf, ocf, hex_data, sizeof(hex_data)), cc->ncmd);
+                if (data_len > sizeof(evt_cmd_complete)) {
+                    process_response(ogf, ocf, data + sizeof(evt_cmd_complete), data_len - sizeof(evt_cmd_complete));
+                }
             }
             break;
 
@@ -386,6 +556,11 @@ void bhci_read(bhci_t *bhci) {
             break;
 
         default:
-            TRACE("hci %s", data2hex(hex_data, sizeof(hex_data), buffer, len));
+            if (event == 0) {
+                // linux bluetooth driver bug: seems to insert a zero byte when it loses sync.
+                // this may be fixed in linux 4.4.
+                ERROR("HCI driver lost sync!");
+                if (bhci->on_desync) bhci->on_desync(bhci, bhci->on_desync_arg);
+            }
     }
 }

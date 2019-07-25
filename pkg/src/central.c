@@ -1,6 +1,6 @@
 /********************************************************************************
  *
- * Copyright (c) 2016 Afero, Inc.
+ * Copyright 2016-2017 Afero, Inc.
  *
  * Licensed under the MIT license (the "License"); you may not use this file
  * except in compliance with the License.  You may obtain a copy of the License
@@ -23,6 +23,7 @@
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
 #include <sys/prctl.h>
@@ -47,8 +48,12 @@
 #include "utils.h"
 
 
+/* time = n * 0.625 msec; 200 = 1/8 sec */
+#define SCAN_INTERVAL 200
+#define SCAN_WINDOW SCAN_INTERVAL
+
 /* any connect attempt that takes this long is broken */
-#define CONNECT_TIMEOUT 5
+#define CONNECT_TIMEOUT 11
 
 /* C is a single-pass parser */
 static evloop_handler_result_t handle_l2cap_write(evloop_t *ev, int fd, void *arg);
@@ -58,6 +63,37 @@ static evloop_handler_result_t handle_l2cap_read(evloop_t *ev, int fd, void *arg
 static time_t s_last_adv_update = 0;
 static int s_last_adv_count = 0;
 
+/* hide advertisements? */
+static bool s_quiet = false;
+
+/*
+ * track how many minutes we've gone without seeing any advertisements. if
+ * it goes too long, we'll re-emphasize to bluez that we want scan enabled.
+ */
+static int s_minutes_without_ads = 0;
+#define MAX_MINUTES_WITHOUT_ADS 10
+
+/* activate scan on the next event loop (postponed) */
+static bool s_activate_scan = false;
+static time_t s_last_activate_scan_check = 0;
+#define ACTIVATE_SCAN_DELAY_SECONDS 5
+
+/*
+ * track failed connections. if we've had too many in a row, the bluez
+ * driver has probably gotten wedged, and we need to kill the session and
+ * force hubby to reconnect and start over.
+ */
+static int s_failed_connection_count = 0;
+#define MAX_FAILED_CONNECTIONS 10
+
+/*
+ * track the receipt of connections that we've already cancelled. bluez
+ * sometimes gets into a tight loop, reporting the same cancelled connection
+ * over and over until it crashes. we can help out by pulling the plug.
+ */
+static int s_dead_connection_count = 0;
+#define MAX_DEAD_CONNECTION_COUNT 5
+
 /* commands */
 
 struct command_context {
@@ -65,6 +101,12 @@ struct command_context {
     evloop_t *ev;
     time_t now;
 };
+
+int cmd_quiet(void *param1, void *param2, void *param3, void *context) {
+    s_quiet = !s_quiet;
+    send_cmd("shh %i", s_quiet);
+    return 0;
+}
 
 /* handle connect command */
 int cmd_connect(void *param1, void *param2, void *param3, void *context) {
@@ -118,17 +160,19 @@ int cmd_connect(void *param1, void *param2, void *param3, void *context) {
 }
 
 static void cancel_connect(bhci_t *bhci, evloop_t *ev, conn_info_t *ci) {
+    s_failed_connection_count++;
     switch (ci->state) {
         case CONN_STATE_CONNECTING:
             DEBUG("cancel %s: sending cancel request", ci->d_info->addr);
             bhci_cancel_device_connect(bhci);
             break;
         case CONN_STATE_CONNECTING_L2CAP:
+            DEBUG("cancel %s: abandoning incomplete l2cap socket", ci->d_info->addr);
+            break;
         case CONN_STATE_CONNECTED:
             DEBUG("cancel %s: closing l2cap socket", ci->d_info->addr);
             close(ci->l2cap_fd);
             evloop_cancel_read(ev, ci->l2cap_fd);
-            evloop_cancel_write(ev, ci->l2cap_fd);
             break;
     }
     cl_free(ci);
@@ -154,7 +198,7 @@ int cmd_cancel_connect(void *param1, void *param2, void *param3, void *context) 
             break;
         default:
             cancel_connect(cc->bhci, cc->ev, ci);
-            bhci_enable_scan(cc->bhci);
+            s_activate_scan = true;
             send_cmd("can %s %04x", addr, STATUS_OK);
             break;
     }
@@ -191,9 +235,10 @@ static void handle_disconnect(bhci_t *bhci, evt_disconn_complete *disconn, void 
 
     close(ci->l2cap_fd);
     evloop_cancel_read(ev, ci->l2cap_fd);
+    gatt_fail_any_pending(ci, STATUS_TIMED_OUT);
     send_cmd("dis %04x %04x %04x", ci->l2cap_fd, STATUS_OK, disconn->reason);
     cl_free(ci);
-    bhci_enable_scan(bhci);
+    s_activate_scan = true;
 }
 
 static void handle_connect(bhci_t *bhci, evt_le_connection_complete *conn, char *addr, void *arg) {
@@ -213,14 +258,20 @@ static void handle_connect(bhci_t *bhci, evt_le_connection_complete *conn, char 
     if (ci == NULL) {
         DEBUG("received dead connection; ignoring");
         close(fd);
-        bhci_enable_scan(bhci);
+        s_activate_scan = true;
+        // sometimes, bluez gets in a loop, dumping these over and over.
+        s_dead_connection_count++;
+        if (s_dead_connection_count > MAX_DEAD_CONNECTION_COUNT) {
+            evloop_stop(ev, SESSION_REBUILD_BLUETOOTH);
+        }
         return;
     }
 
+    s_dead_connection_count = 0;
     if (ci->state != CONN_STATE_CONNECTING) {
         ERROR("connection to %s finished, but we didn't want it", addr);
         close(fd);
-        bhci_enable_scan(bhci);
+        s_activate_scan = true;
         return;
     }
 
@@ -229,7 +280,7 @@ static void handle_connect(bhci_t *bhci, evt_le_connection_complete *conn, char 
     DEBUG("l2cap_connect %s fd=%d", addr, ci->l2cap_fd);
 
     /* making an l2cap connection tends to kill our scan */
-    bhci_enable_scan(bhci);
+    s_activate_scan = true;
 
     if (fd < 0) {
         send_cmd("con %s %04x %04x", addr, STATUS_L2CAP_CONN_FAILED, 0);
@@ -289,10 +340,15 @@ static void handle_advertisement(bhci_t *bhci, uint8_t *data, int len, void *arg
             if (device != NULL) {
                 device->rssi = rxpower;
             }
-            send_cmd("adv %s %s %d", addr, manufacturer_data, rxpower);
+            if (!s_quiet) send_cmd("adv %s %s %d", addr, manufacturer_data, rxpower);
             s_last_adv_count++;
         }
     }
+}
+
+static void handle_desync(bhci_t *bhci, void *arg) {
+    evloop_t *ev = arg;
+    evloop_stop(ev, SESSION_REBUILD_BLUETOOTH);
 }
 
 
@@ -304,19 +360,30 @@ static void handle_l2cap_close(conn_info_t *ci, void *arg) {
 }
 
 static void handle_l2cap_close_loudly(conn_info_t *ci, void *arg) {
+    gatt_fail_any_pending(ci, STATUS_TIMED_OUT);
     send_cmd("dis %04x %04x %04x", ci->l2cap_fd, STATUS_OK, 0);
     handle_l2cap_close(ci, arg);
 }
 
 static void handle_l2cap_cancel(conn_info_t *ci, void *arg) {
+    gatt_fail_any_pending(ci, STATUS_TIMED_OUT);
     send_cmd("con %s %04x %04x", ci->d_info->addr, STATUS_L2CAP_CONN_FAILED, 0);
     handle_l2cap_close(ci, arg);
+}
+
+static void handle_connect_cancel(conn_info_t *ci, void *arg) {
+    bhci_t *bhci = arg;
+    send_cmd("con %s %04x %04x", ci->d_info->addr, STATUS_L2CAP_CONN_FAILED, 0);
+    bhci_cancel_device_connect(bhci);
+    cl_free(ci);
 }
 
 static void check_connect_timeout(conn_info_t *ci, void *arg) {
     struct command_context *cc = arg;
     if (ci->connect_started == 0) return;
     if (cc->now - ci->connect_started <= CONNECT_TIMEOUT) return;
+
+    s_failed_connection_count++;
     DEBUG("connect timeout on %s", ci->d_info->addr);
     cancel_connect(cc->bhci, cc->ev, ci);
     send_cmd("con %s %04x %04x", ci->d_info->addr, STATUS_TIMED_OUT, 0);
@@ -346,11 +413,12 @@ static evloop_handler_result_t handle_l2cap_write(evloop_t *ev, int fd, void *ar
     conn_info_t *ci = cl_find_by_l2cap_fd(&fd);
     if (ci == NULL) {
         ERROR("event for unknown l2cap fd=%i", fd);
+        close(fd);
         return EL_STOP;
     }
 
     int err = 0;
-    int err_len = sizeof(int);
+    socklen_t err_len = sizeof(int);
     if (getsockopt(ci->l2cap_fd, SOL_SOCKET, SO_ERROR, &err, &err_len) < 0 || err != 0) {
         ERROR("l2cap connect fd=%d error %d: %s", ci->l2cap_fd, err, strerror(err));
         close(ci->l2cap_fd);
@@ -360,6 +428,7 @@ static evloop_handler_result_t handle_l2cap_write(evloop_t *ev, int fd, void *ar
     }
 
     DEBUG("l2cap connect successful");
+    s_failed_connection_count = 0;
     ci->state = CONN_STATE_CONNECTED;
     send_cmd("con %s %04x %04x", ci->d_info->addr, STATUS_OK, ci->l2cap_fd);
     evloop_on_read(ev, fd, handle_l2cap_read, NULL);
@@ -389,8 +458,16 @@ static evloop_handler_result_t handle_l2cap_read(evloop_t *ev, int fd, void *arg
 }
 
 static evloop_handler_result_t handle_sigusr1(evloop_t *ev, int signal, void *arg) {
+    bhci_t *bhci = arg;
     dl_debug();
+    bhci_debug_connections(bhci);
     return EL_CONTINUE;
+}
+
+static evloop_handler_result_t handle_sigusr2(evloop_t *ev, int signal, void *arg) {
+    INFO("SIGUSR2: force bluetooth reset");
+    evloop_stop(ev, SESSION_REBUILD_BLUETOOTH);
+    return EL_STOP;
 }
 
 static evloop_handler_result_t handle_periodic(evloop_t *ev, int signal, void *arg) {
@@ -410,8 +487,35 @@ static evloop_handler_result_t handle_periodic(evloop_t *ev, int signal, void *a
 
     if (cc.now - s_last_adv_update >= 60) {
         DEBUG("relayed %i advertisements", s_last_adv_count);
+        if (s_last_adv_count == 0) {
+            s_minutes_without_ads++;
+            if (s_minutes_without_ads > MAX_MINUTES_WITHOUT_ADS) {
+                s_activate_scan = true;
+                s_minutes_without_ads = 0;
+            }
+        } else {
+            s_minutes_without_ads = 0;
+        }
+
         s_last_adv_count = 0;
         s_last_adv_update = cc.now;
+    }
+
+    if (cc.now - s_last_activate_scan_check >= ACTIVATE_SCAN_DELAY_SECONDS) {
+        if (s_activate_scan) {
+            DEBUG("delayed scan activate!");
+            bhci_set_scan_parameters(bhci, SCAN_INTERVAL, SCAN_WINDOW);
+            bhci_enable_scan(bhci);
+        }
+        s_activate_scan = false;
+        s_last_activate_scan_check = cc.now;
+    }
+
+    if (s_failed_connection_count >= MAX_FAILED_CONNECTIONS) {
+        ERROR("failed to connect %i times in a row: reset bluetooth", s_failed_connection_count);
+        s_failed_connection_count = 0;
+        evloop_stop(ev, SESSION_REBUILD_BLUETOOTH);
+        return EL_STOP;
     }
 
     return EL_CONTINUE;
@@ -421,10 +525,11 @@ static evloop_handler_result_t handle_periodic(evloop_t *ev, int signal, void *a
 /* main loop */
 
 int central_session(int client_fd, bhci_t *bhci) {
-    /* time = n * 0.625 msec */
-    int interval = 200;
-    int window = interval;
-    if (bhci_set_scan_parameters(bhci, interval, window) < 0) return SESSION_FAILED_NONFATAL;
+    s_minutes_without_ads = 0;
+    s_failed_connection_count = 0;
+    s_dead_connection_count = 0;
+
+    if (bhci_set_scan_parameters(bhci, SCAN_INTERVAL, SCAN_WINDOW) < 0) return SESSION_FAILED_NONFATAL;
     if (bhci_enable_scan(bhci) < 0) return SESSION_FAILED_NONFATAL;
 
     INFO("starting central session: hci_fd=%d", bhci->fd);
@@ -442,12 +547,15 @@ int central_session(int client_fd, bhci_t *bhci) {
     bhci_on_disconnect(bhci, handle_disconnect, &ev);
     bhci_on_connect(bhci, handle_connect, &ev);
     bhci_on_advertisement(bhci, handle_advertisement, NULL);
+    bhci_on_desync(bhci, handle_desync, &ev);
 
     evloop_on_read(&ev, bhci->fd, handle_hci_read, bhci);
     evloop_on_read(&ev, client_fd, handle_client_read, bhci);
-    evloop_on_signal(&ev, SIGUSR1, handle_sigusr1, NULL);
+    evloop_on_signal(&ev, SIGUSR1, handle_sigusr1, bhci);
+    evloop_on_signal(&ev, SIGUSR2, handle_sigusr2, bhci);
     evloop_periodic(&ev, handle_periodic, bhci);
 
+    bhci_check_interface(bhci);
     if (evloop_run(&ev) != EL_STOPPED) return SESSION_FAILED_FATAL;
 
     INFO("closing central session");
@@ -456,6 +564,7 @@ int central_session(int client_fd, bhci_t *bhci) {
     bhci_disable_scan(bhci);
 
     // close all connections
+    cl_foreach_state(CONN_STATE_CONNECTING, handle_connect_cancel, bhci);
     cl_foreach_state(CONN_STATE_CONNECTING_L2CAP, handle_l2cap_cancel, NULL);
     cl_foreach_state(CONN_STATE_CONNECTED, handle_l2cap_close_loudly, NULL);
     cl_foreach_state(CONN_STATE_DISCONNECTING, handle_l2cap_close_loudly, NULL);

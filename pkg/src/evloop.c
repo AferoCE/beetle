@@ -1,6 +1,26 @@
+/********************************************************************************
+ *
+ * Copyright 2016-2017 Afero, Inc.
+ *
+ * Licensed under the MIT license (the "License"); you may not use this file
+ * except in compliance with the License.  You may obtain a copy of the License
+ * at
+ *
+ * https://opensource.org/licenses/MIT
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ *******************************************************************************/
+
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 
 #include "beetle.h"
 #include "evloop.h"
@@ -93,7 +113,9 @@ evloop_result_t evloop_run(evloop_t *ev) {
             continue;
         }
 
-        if (ev->periodic.handler) ev->periodic.handler(ev, 0, ev->periodic.arg);
+        if (ev->periodic.handler) {
+            if (ev->periodic.handler(ev, 0, ev->periodic.arg) != EL_CONTINUE) break;
+        }
 
         FD_ZERO(&read_fds);
         FD_ZERO(&write_fds);

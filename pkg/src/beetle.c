@@ -1,6 +1,6 @@
 /********************************************************************************
  *
- * Copyright (c) 2016 Afero, Inc.
+ * Copyright 2016-2017 Afero, Inc.
  *
  * Licensed under the MIT license (the "License"); you may not use this file
  * except in compliance with the License.  You may obtain a copy of the License
@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <strings.h>
 #include <sys/prctl.h>
 #include <unistd.h>
 #include <netinet/in.h>
@@ -62,7 +63,9 @@ session_type_t get_session_type(void)
 
 static int s_clientFd  = -1;   /* client socket                    */
 static int s_signal    = 0;    /* the signal that occurred         */
-static int s_port = DEFAULT_PORT;
+
+// listening IP/port:
+static struct sockaddr_in g_sockaddr;
 
 #define SET_SCAN_ENABLE_TIMEOUT         5000
 #define SET_ADVERTISE_ENABLE_TIMEOUT    5000
@@ -133,8 +136,6 @@ int cmd_mode(void *param1, void *param2, void *param3, void *context)
 }
 
 static int set_up_listener(void) {
-    struct sockaddr_in servaddr;
-
     /* create the socket */
     int listenFd = socket(AF_INET, SOCK_STREAM, 0);
     if (listenFd < 0) {
@@ -149,12 +150,7 @@ static int set_up_listener(void) {
         return -1;
     }
 
-    memset(&servaddr,0, sizeof(servaddr));
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    servaddr.sin_port = htons(s_port);
-
-    if (bind(listenFd, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
+    if (bind(listenFd, (struct sockaddr *)&g_sockaddr, sizeof(g_sockaddr)) < 0) {
         log_failure("bind");
         close(listenFd);
         return -1;
@@ -165,7 +161,11 @@ static int set_up_listener(void) {
         close(listenFd);
         return -1;
     }
-    INFO("listening on port %d", s_port);
+
+    char address[32];
+    INFO("listening on %s:%d",
+      inet_ntop(AF_INET, &g_sockaddr.sin_addr, address, sizeof(address)),
+      ntohs(g_sockaddr.sin_port));
     return listenFd;
 }
 
@@ -214,6 +214,7 @@ static void setup_signals(void) {
     sigaction(SIGINT, &siginfo, NULL);
     sigaction(SIGTERM, &siginfo, NULL);
     sigaction(SIGUSR1, &siginfo, NULL);
+    sigaction(SIGUSR2, &siginfo, NULL);
 }
 
 static void usage(void) {
@@ -222,6 +223,7 @@ static void usage(void) {
     fprintf(stderr, "  -i <interface>   set hci interface (example: hci0)\n");
     fprintf(stderr, "  -m {cen|per}     set start up mode (central or peripheral)\n");
     fprintf(stderr, "  -p <port#>       set listen port\n");
+    fprintf(stderr, "  -A <IP>          listen on a specific IP interface, instead of localhost (*security risk*)\n");
     fprintf(stderr, "  -d               run in background (daemon)\n");
     fprintf(stderr, "  -D               increase debug log level\n");
 }
@@ -231,10 +233,20 @@ int main(int argc, char* const argv[])
     int daemonize = 0;
     int opt;
     char *interface = NULL;
-    int dev = -1;
 
-    while ((opt = getopt(argc, argv, "Ddi:m:p:qv")) != -1) {
+    memset(&g_sockaddr, 0, sizeof(g_sockaddr));
+    g_sockaddr.sin_family = AF_INET;
+    g_sockaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    g_sockaddr.sin_port = htons(DEFAULT_PORT);
+
+    while ((opt = getopt(argc, argv, "A:Ddi:m:p:qv")) != -1) {
         switch (opt) {
+            case 'A':
+                if (!inet_pton(AF_INET, optarg, &g_sockaddr.sin_addr)) {
+                    fprintf(stderr, "unable to parse -A address\n");
+                    exit(1);
+                }
+                break;
             case 'D':
                 debug_level_increase();
                 break;
@@ -254,17 +266,20 @@ int main(int argc, char* const argv[])
                     exit(1);
                 }
                 break;
-            case 'p':
-                s_port = atoi(optarg);
-                if (s_port < 1024 || s_port > 65535) {
+            case 'p': {
+                int port = atoi(optarg);
+                if (port < 1024 || port > 65535) {
                     fprintf(stderr, "port must be between 1024 and 65535; falling back to default %d\n", DEFAULT_PORT);
+                    port = DEFAULT_PORT;
                 }
+                g_sockaddr.sin_port = htons(port);
                 break;
+            }
             case 'q':
                 debug_level_decrease();
                 break;
             case 'v':
-                fprintf(stderr, "beetle %s %s\n", BUILD_DATE, REVISION);
+                fprintf(stderr, "beetle-%s %s %s\n", BUILD_NUMBER, BUILD_DATE, REVISION);
                 exit(0);
                 break;
             default:
@@ -285,7 +300,7 @@ int main(int argc, char* const argv[])
     }
 
     openlog("beetle", LOG_PID | LOG_NDELAY, LOG_USER);
-    INFO("beetle starting up: %s %s", BUILD_DATE, REVISION);
+    INFO("beetle-%s starting up: %s %s", BUILD_NUMBER, BUILD_DATE, REVISION);
 
     setup_signals();
 
@@ -304,7 +319,6 @@ int main(int argc, char* const argv[])
         s_clientFd = accept_connection(listenFd);
 
         if (s_clientFd >= 0) {
-
             /* go to default session type */
             s_sessionType = s_defaultSessionType;
 
@@ -319,6 +333,16 @@ int main(int argc, char* const argv[])
                     ERROR("unknown session type %d", s_sessionType);
                     ret = SESSION_FAILED_FATAL;
                     break;
+                }
+
+                if (ret == SESSION_REBUILD_BLUETOOTH) {
+                    DEBUG("bluetooth looks hoarked; kicking it");
+                    bhci_close(&bhci);
+                    if (bhci_open(&bhci, interface) < 0) {
+                        log_failure("bhci_open");
+                        exit(1);
+                    }
+                    continue;
                 }
 
                 if (ret != SESSION_SWITCH_SESSION) {

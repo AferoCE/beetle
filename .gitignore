@@ -1,8 +1,24 @@
-
+pkg/aclocal.m4
+pkg/autom4te.cache/
+pkg/compile
+pkg/config.*
+pkg/configure
+pkg/depcomp
+pkg/install-sh
+pkg/Makefile
+pkg/Makefile.in
+pkg/missing
+pkg/oe-logs
+pkg/oe-workdir
+pkg/stamp-h1
+pkg/src/.deps/
+pkg/src/build_info.h
 pkg/src/CMakeFiles/
 pkg/src/CMakeCache.txt
 pkg/src/beetle
 pkg/src/Makefile
+pkg/src/Makefile.in
 pkg/src/cmake_install.cmake
 pkg/src/*~
+pkg/src/*.o
 
