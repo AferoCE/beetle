@@ -3,15 +3,12 @@ beetle
 
 Beetle is a small daemon that provides simplified access to a bluetooth interface. It listens on a local port (usually 6969) and uses a line-oriented text protocol described in detail in the [commands list](docs/commands.md).
 
-Fixed in Release 1.3 of	BBGW and in Release 1.2	of SAMA5
-
-Fixed in this release:
-After profile OTA, subsequent OTA's were failing.
-Whitelist contained stale entries that needed to be removed.
-Factory Reset event added to afEdge.
-Factory	Reset event added to afLib4.
-Hub logs filled up /etc	which caused profile OTA to fail.
-
+RELEASE 1.4 of the sama5 and bbgw Potenco
+Fixes
+Null string was not forwarded from Hubby to Client Callback function.
+OTA Record integrated into Yocto Build
+OTA Uploader http 409 Was not being handled correctly.
+Watcher script failed to restart if ps was not present. 
 ## Building
 
 There are three ways to build beetle:
